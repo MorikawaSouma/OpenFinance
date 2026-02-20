@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenFinance SSE Event",
+  "type": "object",
+  "required": ["type", "trace_id", "session_id", "timestamp", "payload"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "chat.delta",
+        "chat.done",
+        "tool.call",
+        "tool.result",
+        "task.created",
+        "task.progress",
+        "task.done",
+        "report.ready",
+        "audit.trace"
+      ]
+    },
+    "trace_id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "payload": { "type": "object" }
+  }
+}

@@ -1,0 +1,6 @@
+A-share Market Rule Summary
+Date: 2025-08-19
+
+A-share trading uses T+1 for equities and has daily limit-up and limit-down constraints.
+Execution design should include suspension handling and lot-size restrictions.
+Backtest and execution must use consistent market rules to avoid paper-live mismatch.

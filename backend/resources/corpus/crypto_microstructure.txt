@@ -1,0 +1,6 @@
+Crypto Market Microstructure
+Date: 2025-07-11
+
+Crypto trades 7x24 with exchange-specific liquidity and funding cycles.
+Slippage and spread can change quickly around macro events and liquidation cascades.
+Strategy tests should stress high-volatility windows and widened cost assumptions.
