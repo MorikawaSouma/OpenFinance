@@ -1,31 +1,34 @@
 # OpenFinance
 
 OpenFinance 是一个面向量化研究与风控演练的全栈工作台（monorepo），包含：
-- `FastAPI` 后端（研究计划、回测、因子验证、风控审批、SSE 事件流）
-- `Next.js` 前端（可视化工作台：Dashboard/Chat/Pipeline/Reports/Risk）
-- 本地可追踪数据层（数据集、run、审计链、证据包、聊天会话）
 
-默认配置可离线跑通（`LLM stub` 模式），不需要先接入真实 LLM Key。
+- `backend`：FastAPI 服务，负责研究计划、因子计算、策略选择、回测、风控审批、任务编排与 SSE 事件流。
+- `frontend`：Next.js 工作台，提供 Chat、Pipeline、Tasks、Reports、Risk 等页面。
+- `shared/contracts`：前后端共享事件/模型约定。
 
-## 功能概览
+当前代码默认可离线运行（`LLM stub`），无需先配置真实大模型 Key。
 
-- 一键生成 mock 数据集并注册版本
-- 回测任务异步执行（任务状态可轮询 / 实时事件可订阅）
-- Pipeline 端到端：`plan -> evidence -> factor -> strategy -> backtest`
-- Chat 会话式研究（含会话记忆、run 对比、trace 恢复）
-- Reports 页面查看指标、净值曲线、归因、订单与成交
-- RiskGate 审批流与 kill-switch（默认 live 关闭）
+## 现在支持的核心能力
+
+- 异步长任务体系：`Chat -> 立即返回 task_id -> SSE/Tasks 跟踪 -> 完成后结果可回放`
+- Pipeline 多阶段可观测：`task.created/progress/heartbeat/variant_started/variant_done/done/error`
+- Parent/Child 任务：Tasks 页可看父任务与各变体子任务进度
+- 任务状态可恢复：前端持久化活跃任务，切页/刷新后可继续恢复状态
+- 市场上下文锁定：Pipeline 启动后 market 固化并传递到子任务与 run/report
+- 迁移预检（preflight）：跨市场规则不匹配时先告警再确认
+- Chat 风控快照同步：ChatResponse 返回 `risk_snapshot` 与 `approvals_snapshot`
+- Developer Mode 可观测：Live Trace + Reasoning Steps（不暴露私有 CoT，仅暴露可审计摘要）
 
 ## 仓库结构
 
 ```text
 OpenFinance/
-  backend/                 # FastAPI + research/backtest/trading engine
+  backend/                 # FastAPI + research/backtest/trading
   frontend/                # Next.js workbench UI
   infra/scripts/           # 启停、重置、验收脚本
-  shared/contracts/        # 共享接口约定
-  .openfinance/            # 本地产物目录（运行后生成）
-  .runlogs/                # 本地日志目录（运行后生成）
+  shared/contracts/        # 共享事件与模型契约
+  .openfinance/            # 本地运行产物（运行后生成）
+  .runlogs/                # 本地日志（运行后生成）
 ```
 
 ## 环境要求
@@ -35,12 +38,12 @@ OpenFinance/
 - npm `9+`
 - 可选：`make`（Windows 用户可直接使用 `start_dev.bat`）
 
-## 快速上手（推荐流程）
+## 快速启动
 
-### 1) 克隆项目
+### 1) 克隆仓库
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/MorikawaSouma/OpenFinance.git
 cd OpenFinance
 ```
 
@@ -50,23 +53,25 @@ cd OpenFinance
 Copy-Item .env.example .env
 ```
 
-默认 `.env.example` 已开启：
+默认推荐保留：
+
 - `OPENFINANCE_LLM_FORCE_STUB=true`
 
-如果要接入真实智谱模型，可修改：
+如果接入真实模型：
+
 - `OPENFINANCE_LLM_FORCE_STUB=false`
 - `OPENFINANCE_ZHIPU_API_KEY=<your_key>`
 
 ### 3) 安装依赖
 
-方式 A（有 make）：
+方式 A（推荐，有 `make`）：
 
 ```bash
 make backend-install
 make frontend-install
 ```
 
-方式 B（无 make）：
+方式 B（无 `make`）：
 
 ```powershell
 cd backend
@@ -76,7 +81,7 @@ npm install
 cd ..
 ```
 
-### 4) 启动服务
+### 4) 启动开发环境
 
 Windows 一键启动（推荐）：
 
@@ -84,28 +89,31 @@ Windows 一键启动（推荐）：
 start_dev.bat
 ```
 
-通用方式：
+或跨平台：
 
 ```bash
 make dev
 ```
 
 说明：
+
 - `start_dev.bat` 会调用 `infra/scripts/start_dev.ps1 -Restart`
-- 当 `3000/8000` 端口被占用时，会自动回退到可用端口并写入 `.runlogs/dev.ports`
+- 若 `3000/8000` 被占用，会自动回退可用端口并写入 `.runlogs/dev.ports`
 
-### 5) 验证服务
+### 5) 访问地址
 
-如果使用一键启动，先看实际端口：
+先查看实际端口：
 
 ```powershell
 Get-Content .runlogs/dev.ports
 ```
 
 默认地址（未回退时）：
-- 前端：`http://127.0.0.1:3000`
-- 后端文档：`http://127.0.0.1:8000/docs`
-- 健康检查：`http://127.0.0.1:8000/healthz`
+
+- Frontend: `http://127.0.0.1:3000`
+- Backend Docs: `http://127.0.0.1:8000/docs`
+- Health Check: `http://127.0.0.1:8000/healthz`
+- SSE Stream: `http://127.0.0.1:8000/events/stream`
 
 ### 6) 停止服务
 
@@ -113,172 +121,156 @@ Get-Content .runlogs/dev.ports
 powershell -ExecutionPolicy Bypass -File infra/scripts/stop_dev.ps1
 ```
 
-## 5 分钟体验（前端）
+## 页面说明
 
-1. 打开 Dashboard：`/`
-2. 点击 `Generate Dataset`
-3. 点击 `Run Backtest`
-4. 打开 `Tasks`（`/tasks`）观察任务状态变为 `done`
-5. 打开 `Reports`（`/reports`）进入最新 run 详情
-6. 在 `Chat`（`/chat`）提问，查看研究结论与证据引用
+- `/` Dashboard：最近运行概览、快捷操作
+- `/chat` Chat：对话入口，支持 User/Developer 模式
+- `/pipeline` Pipeline：研究流程触发与过程查看
+- `/tasks` Tasks：父子任务树、进度、阶段、结果链接
+- `/datasets` Datasets：数据集版本与摘要
+- `/strategies` Strategies：策略版本与参数
+- `/factors` Factors：因子版本与健康报告
+- `/reports` Reports：回测列表与对比
+- `/reports/{runId}` Report Detail：指标、净值、交易、归因
+- `/evidence` Evidence：证据包与来源
+- `/risk` Risk：审批流、锁状态、Kill Switch、风控事件
+- `/settings` Settings：工作台配置
 
-## API 使用示例（PowerShell）
+## 任务与事件模型
 
-> 假设后端在 `http://127.0.0.1:8000`。若你使用了端口回退，请替换为实际端口。
+### 任务接口
 
-### 示例 1：生成数据集 -> 跑回测 -> 查看报告
+- `GET /workbench/tasks`
+- `GET /workbench/tasks/{task_id}`
+- `POST /run/submit`
+- `POST /pipeline/run/submit`
+- `POST /workbench/backtests/run`
+- `POST /workbench/factors/run/submit`
 
-```powershell
-$api = "http://127.0.0.1:8000"
+### SSE 关键事件
 
-function Wait-TaskDone([string]$taskId) {
-  do {
-    Start-Sleep -Seconds 1
-    $task = Invoke-RestMethod -Method Get -Uri "$api/workbench/tasks/$taskId"
-    Write-Host "[$($task.status)] $($task.progress)% - $($task.message)"
-  } while ($task.status -notin @("done", "failed"))
-  return $task
-}
+`shared/contracts/events.json` 中已定义主要事件类型：
 
-$dsTask = Invoke-RestMethod -Method Post -Uri "$api/workbench/datasets/generate" -ContentType "application/json" -Body (@{
-  dataset_id = "wb_demo"
-  market = "US"
-  symbol = "AAPL"
-  start = "2024-01-01"
-  end = "2024-02-01"
-  seed = 1
-  base_price = 100
-} | ConvertTo-Json)
+- `task.created`
+- `task.progress`
+- `task.heartbeat`
+- `task.variant_started`
+- `task.variant_done`
+- `task.done`
+- `task.error`
+- `agent.dispatched` / `agent.completed`
+- `tool.call.started` / `tool.call.finished`
+- `artifact.created`
+- `reasoning.step.created` / `reasoning.step.updated`
+- `reasoning.trace.final`
+- `chat.delta` / `chat.done`
 
-$dsFinal = Wait-TaskDone $dsTask.task_id
-if ($dsFinal.status -eq "failed") { throw "dataset task failed" }
-$datasetVersion = $dsFinal.result.dataset_version
+## Chat 与 Pipeline 的运行方式
 
-$btTask = Invoke-RestMethod -Method Post -Uri "$api/workbench/backtests/run" -ContentType "application/json" -Body (@{
-  dataset_version = $datasetVersion
-  strategy_id = "demo"
-  strategy_version = "0.1.0"
-  market = "US"
-  start = "2024-01-01"
-  end = "2024-02-01"
-} | ConvertTo-Json)
+### General Info（如“美股最近如何”）
 
-$btFinal = Wait-TaskDone $btTask.task_id
-if ($btFinal.status -eq "failed") { throw "backtest task failed" }
-$runId = $btFinal.result.run_id
+- Chat 返回结论与引用
+- Developer Mode 可看到 `Reasoning Steps`（意图识别、证据使用、结论综合）
+- 任务会被正常闭环（创建后进入 done/error，不应长期停在 initializing）
 
-$report = Invoke-RestMethod -Method Get -Uri "$api/workbench/reports/$runId"
-$report.metrics
-```
+### Pipeline（如“基于当前 JP 市场给我一个低回撤策略并回测”）
 
-### 示例 2：聊天接口 + 会话历史
+- Chat 立即返回 `accepted + task_id`
+- 前端显示 Running Card，可跳转 Tasks
+- Pipeline 运行中持续推送阶段/心跳/子任务进度
+- 完成后结果写入任务 `result/result_ref`，可直接打开 Report/Evidence/Plan
 
-```powershell
-$api = "http://127.0.0.1:8000"
+## Developer Mode 说明
 
-$chat = Invoke-RestMethod -Method Post -Uri "$api/chat/message" -ContentType "application/json" -Body (@{
-  message = "为什么最近日经波动大？给我高夏普低回撤策略并附回测要点。"
-} | ConvertTo-Json)
+Developer Mode 面向调试和审计，不展示私有 CoT 原文，展示的是“可审计摘要”：
 
-$chat.assistant_message
-$sessionId = $chat.session_id
-Invoke-RestMethod -Method Get -Uri "$api/chat/sessions/$sessionId"
-```
+- Live Trace：agent/tool/artifact/audit 实时事件流
+- Reasoning Steps：结构化步骤（hypothesis/evidence/counterevidence/revision/decision/warning）
+- trace_id 追踪：支持 `GET /trace/{trace_id}/restore` 恢复上下文
 
-### 示例 3：直接跑 Pipeline
+## 本地数据与产物
 
-```powershell
-$api = "http://127.0.0.1:8000"
+常用路径（默认）：
 
-$pipe = Invoke-RestMethod -Method Post -Uri "$api/run" -ContentType "application/json" -Body (@{
-  question = "给我一套低回撤策略并做三组实验对比"
-  market = "US"
-  run_paper_trade = $true
-  experiments = 3
-} | ConvertTo-Json)
+- `.openfinance/registry/tasks.json`
+- `.openfinance/registry/runs.jsonl`
+- `.openfinance/registry/datasets.jsonl`
+- `.openfinance/registry/plans.jsonl`
+- `.openfinance/registry/audit.jsonl`
+- `.openfinance/registry/chat_sessions.json`
+- `.openfinance/registry/evidence.sqlite3`
+- `.openfinance/registry/factors.sqlite3`
+- `.openfinance/registry/approvals.sqlite3`
+- `.openfinance/artifacts/factors/`
+- `.runlogs/backend.out.log`
+- `.runlogs/frontend.out.log`
 
-$pipe.plan_id
-$pipe.run_id
-$pipe.backtest_metrics
-```
+## 测试与验收
 
-## 如何查看结果
-
-### 在前端页面看
-
-- `Dashboard (/)`：最近 run、快速操作入口
-- `Tasks (/tasks)`：任务执行进度与错误信息
-- `Datasets (/datasets)`：数据集版本与质量摘要
-- `Reports (/reports)`：回测列表、对比、多市场/稳健性分析
-- `Report Detail (/reports/{runId})`：指标、曲线、成交、归因、证据引用
-- `Pipeline (/pipeline)`：端到端时间线与计划快照
-- `Chat (/chat)`：问答、会话历史、开发模式调试面板
-- `Risk (/risk)`：审批流、风险事件、kill switch、模拟 live 日志
-- `Evidence (/evidence)`：证据包与来源可信度
-
-### 在本地文件看
-
-- 数据集注册：`.openfinance/registry/datasets.jsonl`
-- 回测注册：`.openfinance/registry/runs.jsonl`
-- 研究计划注册：`.openfinance/registry/plans.jsonl`
-- 审计链：`.openfinance/registry/audit.jsonl`
-- 聊天会话：`.openfinance/registry/chat_sessions.json`
-- 证据库：`.openfinance/registry/evidence.sqlite3`
-- 风控审批：`.openfinance/registry/approvals.sqlite3`
-- 数据与报告文件：`.openfinance/data/*.json`
-- 因子产物：`.openfinance/artifacts/factors/*.json` 与 `*.health.json`
-- 启动日志：`.runlogs/backend.out.log`、`.runlogs/frontend.out.log`
-
-## 常用开发命令
+后端测试：
 
 ```bash
-# 启动
-make dev
-
-# 后端测试
 make backend-test
+```
 
-# 前端 E2E
-cd frontend && npm run test:e2e
+或：
 
-# 重置本地产物（会删除 .openfinance 和 .runlogs）
-make dev-reset
-# 或
-python infra/scripts/dev_reset.py --yes
+```powershell
+cd backend
+pytest
+```
+
+前端 E2E：
+
+```powershell
+cd frontend
+npm run test:e2e
+```
+
+后端验收脚本（Windows）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File infra/scripts/acceptance_backend.ps1
 ```
 
 ## 常见问题
 
-### 1) 报错 `no dataset available; generate one first`
+### 1) 前端连不上后端
 
-先生成数据集，再跑回测：
-- 前端点 `Generate Dataset`
-- 或调用 `POST /workbench/datasets/generate`
+- 检查 `GET /healthz`
+- 检查 `.runlogs/dev.ports` 里的实际端口
+- 确认 `NEXT_PUBLIC_API_BASE` 指向正确后端地址
 
-### 2) 前端连不上后端
+### 2) 任务看起来卡住
 
-- 检查后端健康：`/healthz`
-- 查看 `.runlogs/dev.ports` 确认实际端口
-- 手动启动前端时，设置 `NEXT_PUBLIC_API_BASE=http://127.0.0.1:<backend_port>`
+- 刷新 `/tasks` 并查看该任务 `status/error`
+- 检查 `.runlogs/backend.out.log` 与 `.openfinance/registry/tasks.json`
+- 服务重启后，历史 `queued/running` 任务会被恢复为 `error`（防止“假运行”）
 
-### 3) 想用真实 LLM，不想用 stub
-
-在 `.env` 中设置：
-- `OPENFINANCE_LLM_FORCE_STUB=false`
-- `OPENFINANCE_ZHIPU_API_KEY=<your_key>`
-
-### 4) 如何彻底清理本地状态
-
-执行：
+### 3) 想强制清理本地状态
 
 ```bash
+make dev-reset
+```
+
+或：
+
+```powershell
 python infra/scripts/dev_reset.py --yes
 ```
 
-## 安全默认策略
+## 安全默认
 
 - `live trading` 默认关闭
-- 需要审批状态机才能 enable（`pending -> approved -> enabled`）
+- 支持审批流与状态迁移（pending/approved/enabled/revoked）
 - 支持 `kill switch` 一键阻断
 
+---
 
+如果你是第一次看这个仓库，建议从以下路径开始阅读代码：
+
+1. `backend/openfinance/api/routes_chat.py`
+2. `backend/openfinance/research/pipeline.py`
+3. `backend/openfinance/quant/backtest/runner.py`
+4. `frontend/src/components/providers/workbench-provider.tsx`
+5. `frontend/src/app/chat/page.tsx`
