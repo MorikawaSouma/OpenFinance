@@ -77,6 +77,7 @@ class BacktestRunner:
             RunRegistryEntry(
                 run_id=report.run_id,
                 dataset_version=request.dataset_version,
+                market=report.market,
                 strategy_id=request.strategy_id,
                 strategy_version=request.strategy_version,
                 audit_trace_id=report.audit_trace_id,
@@ -91,6 +92,7 @@ class BacktestRunner:
                 event_type="backtest.run.completed",
                 payload={
                     "dataset_version": request.dataset_version,
+                    "market": report.market,
                     "strategy_id": request.strategy_id,
                     "strategy_version": request.strategy_version,
                     "report_path": str(report_path),
@@ -152,6 +154,7 @@ class BacktestRunner:
         if len(bars) < 2:
             return BacktestReport(
                 dataset_version=request.dataset_version,
+                market=str(request.market or "US").upper(),
                 strategy_version=request.strategy_version,
                 strategy_decision=strategy_decision_payload,
                 factor_versions=factor_versions,
@@ -176,7 +179,7 @@ class BacktestRunner:
                 },
             )
 
-        market = str(dataset.generation_config.get("market", request.market or "US")).upper()
+        market = str(request.market or "US").upper()
         symbol = str(dataset.generation_config.get("symbol", "DEMO"))
         sector = str(dataset.generation_config.get("sector") or self._default_sector(symbol))
         rules = self.market_rules.get(market)
@@ -964,6 +967,7 @@ class BacktestRunner:
 
         return BacktestReport(
             dataset_version=request.dataset_version,
+            market=market,
             strategy_version=request.strategy_version,
             strategy_decision=strategy_decision_payload,
             factor_versions=factor_versions,

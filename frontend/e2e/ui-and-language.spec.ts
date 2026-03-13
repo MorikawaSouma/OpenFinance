@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+﻿import { expect, test, type Page, type Route } from "@playwright/test";
 
 function hasChinese(text: string) {
   return /[\u4e00-\u9fff]/.test(text);
@@ -13,22 +13,40 @@ async function mockCoreApis(page: Page) {
     const url = new URL(req.url());
     const path = url.pathname;
 
+    if (req.method() === "OPTIONS") {
+      await route.fulfill({
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "content-type",
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        },
+      });
+      return;
+    }
+
     if (path === "/events/stream") {
       await route.fulfill({
         status: 200,
-        headers: { "Content-Type": "text/event-stream; charset=utf-8" },
+        headers: { "Content-Type": "text/event-stream; charset=utf-8", "Access-Control-Allow-Origin": "*" },
         body: "data: {\"type\":\"audit.trace\",\"trace_id\":\"t1\",\"session_id\":\"sse\",\"timestamp\":\"2026-02-16T00:00:00Z\",\"payload\":{\"heartbeat\":true}}\n\n",
       });
       return;
     }
 
-    if (path === "/workbench/tasks") return route.fulfill({ status: 200, body: "[]" });
-    if (path === "/workbench/datasets") return route.fulfill({ status: 200, body: "[]" });
-    if (path === "/workbench/runs") return route.fulfill({ status: 200, body: "[]" });
-    if (path === "/workbench/strategies") return route.fulfill({ status: 200, body: "[]" });
+    const jsonHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json",
+    };
+
+    if (path === "/workbench/tasks") return route.fulfill({ status: 200, headers: jsonHeaders, body: "[]" });
+    if (path === "/workbench/datasets") return route.fulfill({ status: 200, headers: jsonHeaders, body: "[]" });
+    if (path === "/workbench/runs") return route.fulfill({ status: 200, headers: jsonHeaders, body: "[]" });
+    if (path === "/workbench/strategies") return route.fulfill({ status: 200, headers: jsonHeaders, body: "[]" });
     if (path === "/trading/status") {
       return route.fulfill({
         status: 200,
+        headers: jsonHeaders,
         body: JSON.stringify({
           mode: "paper",
           kill_switch_enabled: false,
@@ -46,11 +64,12 @@ async function mockCoreApis(page: Page) {
         }),
       });
     }
-    if (path === "/trading/approvals") return route.fulfill({ status: 200, body: "[]" });
+    if (path === "/trading/approvals") return route.fulfill({ status: 200, headers: jsonHeaders, body: "[]" });
 
-    if (path === "/chat/sessions") {
+    if (path === "/chat/sessions" || path === "/chat/sessions/") {
       return route.fulfill({
         status: 200,
+        headers: jsonHeaders,
         body: JSON.stringify([
           {
             session_id: sessionId,
@@ -65,13 +84,16 @@ async function mockCoreApis(page: Page) {
         ]),
       });
     }
-    if (path === `/chat/sessions/${sessionId}`) {
-      return route.fulfill({ status: 200, body: JSON.stringify(turns) });
+    if (path === `/chat/sessions/${sessionId}` || path === `/chat/sessions/${sessionId}/`) {
+      return route.fulfill({ status: 200, headers: jsonHeaders, body: JSON.stringify(turns) });
     }
-    if (path === "/chat/message" && req.method() === "POST") {
-      const payload = req.postDataJSON() as { message?: string };
+    if ((path === "/chat/message" || path.endsWith("/chat/message/")) && req.method() === "POST") {
+      const payload = req.postDataJSON() as { message?: string; include_debug?: boolean };
       const message = payload.message ?? "";
-      const assistant = hasChinese(message) ? "这是中文回答：系统已根据中文输入返回中文。" : "This is an English reply: output follows input language.";
+      const zh = hasChinese(message);
+      const assistant = zh
+        ? "这是中文回答：系统已根据中文输入返回中文。"
+        : "This is an English reply: output follows input language.";
       turns = [
         {
           role: "user",
@@ -86,13 +108,22 @@ async function mockCoreApis(page: Page) {
       ];
       return route.fulfill({
         status: 200,
+        headers: jsonHeaders,
         body: JSON.stringify({
           session_id: sessionId,
           trace_id: "trace-e2e",
+          mode: "general_info_query",
+          language: zh ? "zh" : "en",
           assistant_message: assistant,
           evidence_pack_id: "pack-e2e",
-          cards: {},
-          developer_payload: {},
+          cards: [
+            {
+              type: "summary",
+              title: zh ? "结论" : "Summary",
+              content: assistant,
+            },
+          ],
+          debug: payload.include_debug ? { intent: "general_info_query", trace_id: "trace-e2e" } : {},
           turns,
         }),
       });
@@ -104,8 +135,8 @@ async function mockCoreApis(page: Page) {
 
 function assertNoMojibake(text: string | null) {
   const body = text ?? "";
-  expect(body).not.toContain("�");
-  expect(body).not.toContain("□");
+  expect(body).not.toContain("锟");
+  expect(body).not.toContain("鈻");
 }
 
 test("UI labels stay English and render without mojibake", async ({ page }) => {
@@ -128,11 +159,13 @@ test("chat output language follows user input language in one session", async ({
     const resp = await fetch("http://127.0.0.1:8000/chat/message", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: "请用中文分析一下风险。" }),
+      body: JSON.stringify({ message: "\u8bf7\u7528\u4e2d\u6587\u5206\u6790\u4e00\u4e0b\u98ce\u9669\u3002" }),
     });
     return resp.json();
   });
-  expect(String(zhPayload.assistant_message ?? "")).toContain("中文回答");
+  expect(String(zhPayload.language ?? "")).toBe("zh");
+  expect(hasChinese(String(zhPayload.assistant_message ?? ""))).toBe(true);
+  expect(String(zhPayload.cards?.[0]?.title ?? "")).toBe("结论");
 
   const enPayload = await page.evaluate(async (sessionId: string) => {
     const resp = await fetch("http://127.0.0.1:8000/chat/message", {
@@ -142,7 +175,9 @@ test("chat output language follows user input language in one session", async ({
     });
     return resp.json();
   }, String(zhPayload.session_id));
-  expect(String(enPayload.assistant_message ?? "")).toContain("This is an English reply");
+  expect(String(enPayload.language ?? "")).toBe("en");
+  expect(String(enPayload.assistant_message ?? "")).toContain("English reply");
+  expect(String(enPayload.cards?.[0]?.title ?? "")).toBe("Summary");
 
   await expect(page.getByRole("heading", { name: "Research Workspace", exact: true })).toBeVisible();
 });

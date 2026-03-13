@@ -2,11 +2,21 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from openfinance.agents.base import BaseAgent
 from openfinance.agents.counterfactual import CounterfactualQueryGenerator
-from openfinance.agents.schemas import AgentCitation, AgentOutput, AgentTaskInput, ReasoningTrace
+from openfinance.agents.schemas import (
+    AgentCitation,
+    AgentOutput,
+    AgentTaskInput,
+    ReasoningEvidenceRef,
+    ReasoningTrace,
+    ReasoningTraceStep,
+    ReasoningTraceStepType,
+)
+from openfinance.core.config import settings
 from openfinance.knowledge.evidence import EvidenceSource
 from openfinance.knowledge.service import KnowledgeService, build_default_knowledge_service
 from openfinance.llm.provider import LLMProvider
@@ -109,31 +119,168 @@ class EvidenceGroundedAgent(BaseAgent):
         ranked_sources = self._rank_sources(question, all_sources)
         selected_sources = ranked_sources[: max(1, min(task.max_citations, len(ranked_sources) or 1))]
         prompt = self._build_prompt(task=task, question=question, selected_sources=selected_sources)
+        prompt_hash = hashlib.sha1(prompt.encode("utf-8")).hexdigest()
+
+        emitted_steps: list[ReasoningTraceStep] = []
+        step_idx = 1
+        emitted_steps.append(
+            self._emit_reasoning_step(
+                task=task,
+                step_idx=step_idx,
+                step_type="hypothesis",
+                title="Hypothesis Draft",
+                summary=f"{self.name} drafted a lens-based hypothesis for the question.",
+                evidence_refs=[],
+                confidence_delta=0.0,
+                prompt_hash=prompt_hash,
+            )
+        )
+        step_idx += 1
+        evidence_refs_for_step = [
+            ReasoningEvidenceRef(source_id=source.source_id, title=source.title, ts=_ts_text(source))
+            for source in selected_sources[:3]
+        ]
+        emitted_steps.append(
+            self._emit_reasoning_step(
+                task=task,
+                step_idx=step_idx,
+                step_type="evidence_use",
+                title="Evidence Used",
+                summary=f"{self.name} selected {len(evidence_refs_for_step)} evidence rows for synthesis.",
+                evidence_refs=evidence_refs_for_step,
+                confidence_delta=0.08 if evidence_refs_for_step else None,
+                prompt_hash=prompt_hash,
+            )
+        )
+        step_idx += 1
+
+        counter_refs_for_step = self._counter_refs_from_task(task=task, all_sources=all_sources)
+        if counter_refs_for_step:
+            emitted_steps.append(
+                self._emit_reasoning_step(
+                    task=task,
+                    step_idx=step_idx,
+                    step_type="counterevidence_use",
+                    title="Counterevidence Check",
+                    summary=f"{self.name} evaluated counterevidence before finalizing the recommendation.",
+                    evidence_refs=counter_refs_for_step,
+                    confidence_delta=-0.05,
+                    prompt_hash=prompt_hash,
+                )
+            )
+        else:
+            emitted_steps.append(
+                self._emit_reasoning_step(
+                    task=task,
+                    step_idx=step_idx,
+                    step_type="warning",
+                    title="Counterevidence Skip",
+                    summary="No strong counterevidence references were available in this pass.",
+                    evidence_refs=[],
+                    confidence_delta=None,
+                    prompt_hash=prompt_hash,
+                )
+            )
+        step_idx += 1
+
         response = self._llm.complete(prompt, max_tokens=420, temperature=0.15)
-        parsed = _extract_json_object(response.content) or {}
+        force_parse_error = bool(task.force_reasoning_parse_error or settings.agent_force_step_parse_error)
+        parsed = {} if force_parse_error else (_extract_json_object(response.content) or {})
+        parse_error = "forced_parse_error" if force_parse_error else ""
+
+        parsed_steps_raw: list[dict[str, Any]] = []
+        final_payload: dict[str, Any] = {}
+        if isinstance(parsed.get("final"), dict):
+            final_payload = dict(parsed.get("final") or {})
+            raw_steps = parsed.get("steps")
+            if isinstance(raw_steps, list):
+                parsed_steps_raw = [row for row in raw_steps if isinstance(row, dict)]
+        else:
+            final_payload = dict(parsed)
+        if not final_payload and not parse_error:
+            parse_error = "json_parse_failed_or_schema_mismatch"
 
         evidence_refs = self._normalize_evidence_refs(
-            parsed_refs=parsed.get("evidence_refs"),
+            parsed_refs=final_payload.get("evidence_refs"),
             selected_sources=selected_sources,
             all_sources=all_sources,
         )
         citations = self._build_citations(evidence_refs=evidence_refs, all_sources=all_sources)
 
-        claim = str(parsed.get("claim", "")).strip()
+        claim = str(final_payload.get("claim", "")).strip()
         if (not claim) or _is_placeholder_line(claim):
             claim = self._fallback_claim(question=question, selected_sources=selected_sources)
 
-        rationale = _as_text_lines(parsed.get("rationale"))
+        rationale = _as_text_lines(final_payload.get("rationale"))
         rationale = [line for line in rationale if not _is_placeholder_line(line)]
         if not rationale:
             rationale = self._fallback_rationale(question=question, selected_sources=selected_sources)
 
-        uncertainty = _as_text_lines(parsed.get("uncertainty"))
+        uncertainty = _as_text_lines(final_payload.get("uncertainty"))
         uncertainty = [line for line in uncertainty if not _is_placeholder_line(line)]
         if not uncertainty:
             uncertainty = self._fallback_uncertainty(all_sources=all_sources)
-        parsed_confidence = _normalized_confidence(parsed.get("confidence"))
-        reasoning_trace = self._parse_reasoning_trace(parsed.get("reasoning_trace"))
+        parsed_confidence = _normalized_confidence(final_payload.get("confidence"))
+        reasoning_trace = self._parse_reasoning_trace(
+            final_payload.get("reasoning_trace") if final_payload else parsed.get("reasoning_trace")
+        )
+
+        if parse_error:
+            emitted_steps.append(
+                self._emit_reasoning_step(
+                    task=task,
+                    step_idx=step_idx,
+                    step_type="warning",
+                    title="Parse Fallback",
+                    summary="Model JSON step payload was unavailable; fallback reasoning steps were used.",
+                    evidence_refs=[],
+                    confidence_delta=None,
+                    parse_error=parse_error,
+                    prompt_hash=prompt_hash,
+                )
+            )
+            step_idx += 1
+
+        revision_summary = self._step_summary_from_payload(parsed_steps_raw, "revision")
+        if not revision_summary:
+            revision_summary = f"{self.name} revised the draft using available evidence and uncertainty checks."
+        emitted_steps.append(
+            self._emit_reasoning_step(
+                task=task,
+                step_idx=step_idx,
+                step_type="revision",
+                title="Revision",
+                summary=revision_summary,
+                evidence_refs=[
+                    ReasoningEvidenceRef(source_id=cite.source_id, title=cite.title, ts=cite.timestamp)
+                    for cite in citations[:3]
+                ],
+                confidence_delta=None,
+                parse_error=parse_error or None,
+                prompt_hash=prompt_hash,
+            )
+        )
+        step_idx += 1
+
+        decision_summary = self._step_summary_from_payload(parsed_steps_raw, "decision")
+        if not decision_summary:
+            decision_summary = claim[:220] if claim else f"{self.name} produced a final recommendation."
+        emitted_steps.append(
+            self._emit_reasoning_step(
+                task=task,
+                step_idx=step_idx,
+                step_type="decision",
+                title="Decision",
+                summary=decision_summary,
+                evidence_refs=[
+                    ReasoningEvidenceRef(source_id=cite.source_id, title=cite.title, ts=cite.timestamp)
+                    for cite in citations[:2]
+                ],
+                confidence_delta=parsed_confidence,
+                parse_error=parse_error or None,
+                prompt_hash=prompt_hash,
+            )
+        )
 
         return AgentOutput(
             agent_name=self.name,
@@ -146,10 +293,113 @@ class EvidenceGroundedAgent(BaseAgent):
             if parsed_confidence is not None
             else self._confidence(evidence_refs=evidence_refs, total_sources=len(all_sources)),
             reasoning_trace=reasoning_trace,
+            reasoning_steps=emitted_steps,
             next_actions=self._next_actions(evidence_refs=evidence_refs),
-            prompt_used=prompt if task.developer_mode else None,
+            prompt_used=f"sha1:{prompt_hash}" if task.developer_mode else None,
+            prompt_hash=prompt_hash if task.developer_mode else None,
             raw_response=response.content if task.developer_mode else None,
         )
+
+    def _emit_reasoning_step(
+        self,
+        *,
+        task: AgentTaskInput,
+        step_idx: int,
+        step_type: ReasoningTraceStepType,
+        title: str,
+        summary: str,
+        evidence_refs: list[ReasoningEvidenceRef],
+        confidence_delta: float | None = None,
+        parse_error: str | None = None,
+        prompt_hash: str | None = None,
+    ) -> ReasoningTraceStep:
+        step = ReasoningTraceStep(
+            trace_id=task.trace_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            agent_name=self.name,
+            step_idx=step_idx,
+            step_type=step_type,
+            title=title[:96],
+            summary=summary[:360],
+            evidence_refs=evidence_refs,
+            confidence_delta=confidence_delta,
+            parse_error=parse_error,
+            prompt_hash=prompt_hash,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        emitter = task.observable_emitter
+        if callable(emitter):
+            emitter(
+                "reasoning.step.created",
+                {
+                    "step": step.model_dump(mode="json"),
+                    "agent_name": self.name,
+                    "step_idx": step.step_idx,
+                    "step_type": step.step_type,
+                    "title": step.title,
+                    "summary": step.summary,
+                    "evidence_refs": [row.model_dump(mode="json") for row in step.evidence_refs],
+                    "parse_error": step.parse_error,
+                    "prompt_hash": step.prompt_hash,
+                },
+            )
+        return step
+
+    def _emit_reasoning_step_update(
+        self,
+        *,
+        task: AgentTaskInput,
+        step: ReasoningTraceStep,
+    ) -> ReasoningTraceStep:
+        emitter = task.observable_emitter
+        if callable(emitter):
+            emitter(
+                "reasoning.step.updated",
+                {
+                    "step": step.model_dump(mode="json"),
+                    "agent_name": self.name,
+                    "step_idx": step.step_idx,
+                    "step_type": step.step_type,
+                    "title": step.title,
+                    "summary": step.summary,
+                    "evidence_refs": [row.model_dump(mode="json") for row in step.evidence_refs],
+                    "parse_error": step.parse_error,
+                    "prompt_hash": step.prompt_hash,
+                },
+            )
+        return step
+
+    def _counter_refs_from_task(
+        self,
+        *,
+        task: AgentTaskInput,
+        all_sources: list[EvidenceSource],
+    ) -> list[ReasoningEvidenceRef]:
+        loop = task.constraints.get("research_loop") if isinstance(task.constraints, dict) else {}
+        ids = loop.get("counter_source_ids") if isinstance(loop, dict) else []
+        if not isinstance(ids, list):
+            return []
+        source_map = {source.source_id: source for source in all_sources}
+        refs: list[ReasoningEvidenceRef] = []
+        for source_id in ids:
+            key = str(source_id).strip()
+            source = source_map.get(key)
+            if not key or source is None:
+                continue
+            refs.append(ReasoningEvidenceRef(source_id=source.source_id, title=source.title, ts=_ts_text(source)))
+            if len(refs) >= 3:
+                break
+        return refs
+
+    def _step_summary_from_payload(self, rows: list[dict[str, Any]], step_type: str) -> str:
+        for row in rows:
+            if str(row.get("step_type") or "").strip().lower() != step_type.strip().lower():
+                continue
+            summary = str(row.get("summary") or "").strip()
+            if summary:
+                return summary
+        return ""
 
     def _rank_sources(self, question: str, sources: list[EvidenceSource]) -> list[EvidenceSource]:
         q = question.lower()
@@ -189,26 +439,26 @@ class EvidenceGroundedAgent(BaseAgent):
             )
         evidence_json = json.dumps(rows, ensure_ascii=False)
         return (
-            "You are an investment expert agent. Read the evidence list and return strict JSON only.\n"
-            "Do not use markdown. Do not omit evidence usage.\n"
-            "Required fields:\n"
+            "You are an investment expert agent.\n"
+            "Return strict JSON only; do not include private chain-of-thought.\n"
+            "Use concise, user-safe summaries.\n"
+            "Required schema:\n"
             "{\n"
-            '  "claim": "one clear conclusion",\n'
-            '  "rationale": ["reason 1", "reason 2"],\n'
-            '  "evidence_refs": ["source_id_from_list"],\n'
-            '  "uncertainty": ["counterpoint or unknown"],\n'
-            '  "confidence": 0.0,\n'
-            '  "reasoning_trace": {\n'
-            '    "steps": [\n'
-            '      {\n'
-            '        "step_type": "hypothesis",\n'
-            '        "question": "question text",\n'
-            '        "query": "optional query string",\n'
-            '        "evidence_refs": ["source_id_from_list"],\n'
-            '        "output_summary": "short summary",\n'
-            '        "confidence_delta": 0.0\n'
-            "      }\n"
-            "    ]\n"
+            '  "steps": [\n'
+            "    {\n"
+            '      "step_type": "hypothesis|evidence_use|counterevidence_use|revision|decision|warning",\n'
+            '      "title": "short title",\n'
+            '      "summary": "short user-safe summary",\n'
+            '      "evidence_indices_used": [0,1],\n'
+            '      "confidence_delta": 0.0\n'
+            "    }\n"
+            "  ],\n"
+            '  "final": {\n'
+            '    "claim": "one clear conclusion",\n'
+            '    "rationale": ["reason 1", "reason 2"],\n'
+            '    "evidence_refs": ["source_id_from_list"],\n'
+            '    "uncertainty": ["counterpoint or unknown"],\n'
+            '    "confidence": 0.0\n'
             "  }\n"
             "}\n"
             f"Agent: {self.name}\n"
@@ -220,7 +470,7 @@ class EvidenceGroundedAgent(BaseAgent):
             f"EvidencePackID: {task.evidence_pack_id or ''}\n"
             f"Evidence sources: {evidence_json}\n"
             "If evidence is available, cite at least one source_id from evidence_refs.\n"
-            "reasoning_trace must include at least 4 steps and include one counterevidence_search step."
+            "Do not output prompt text; output only schema fields."
         )
 
     def _normalize_evidence_refs(
@@ -471,6 +721,52 @@ class KahnemanAgent(EvidenceGroundedAgent):
             else:
                 counter_refs = [evidence_pack.sources[-1].source_id]
         counter_refs = list(dict.fromkeys(counter_refs))[:4]
+
+        source_map = {source.source_id: source for source in counter_sources}
+        if evidence_pack:
+            for source in evidence_pack.sources:
+                source_map.setdefault(source.source_id, source)
+        counter_step_refs: list[ReasoningEvidenceRef] = []
+        for source_id in counter_refs:
+            source = source_map.get(source_id)
+            counter_step_refs.append(
+                ReasoningEvidenceRef(
+                    source_id=source_id,
+                    title=source.title if source else "",
+                    ts=_ts_text(source) if source else None,
+                )
+            )
+        parse_error = next((row.parse_error for row in out.reasoning_steps if row.parse_error), None)
+        target_idx = -1
+        for idx, step in enumerate(out.reasoning_steps):
+            if step.step_type in {"counterevidence_use", "warning"}:
+                target_idx = idx
+                break
+        counter_summary = (
+            "Counterfactual retrieval found evidence that challenges the initial thesis."
+            if counter_refs
+            else "Counterfactual retrieval did not find strong disconfirming evidence; keep explicit guardrails."
+        )
+        counter_step = ReasoningTraceStep(
+            trace_id=task.trace_id,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            agent_name=self.name,
+            step_idx=(out.reasoning_steps[target_idx].step_idx if target_idx >= 0 else max(1, len(out.reasoning_steps) + 1)),
+            step_type="counterevidence_use" if counter_refs else "warning",
+            title="Counterevidence Check",
+            summary=counter_summary,
+            evidence_refs=counter_step_refs,
+            confidence_delta=(-0.08 if counter_refs else None),
+            parse_error=parse_error,
+            prompt_hash=out.prompt_hash,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        self._emit_reasoning_step_update(task=task, step=counter_step)
+        if target_idx >= 0:
+            out.reasoning_steps[target_idx] = counter_step
+        else:
+            out.reasoning_steps.append(counter_step)
 
         old_conf = float(out.confidence)
         conf_penalty = 0.08 if len(counter_refs) >= 2 else (0.05 if counter_refs else 0.0)

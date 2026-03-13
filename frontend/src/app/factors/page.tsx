@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -27,12 +28,13 @@ import type { FactorDetail, FactorMultiMarketCompareResponse, FactorSummary } fr
 const MARKET_OPTIONS = ["US", "CN", "JP", "CRYPTO"] as const;
 
 export default function FactorsPage() {
-  const { latestDatasetVersion, pushToast } = useWorkbench();
+  const { latestDatasetVersion, pushToast, tasks, activeSessionId } = useWorkbench();
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<FactorSummary[]>([]);
   const [activeVersion, setActiveVersion] = useState<string | null>(null);
   const [detail, setDetail] = useState<FactorDetail | null>(null);
   const [running, setRunning] = useState(false);
+  const [factorTaskId, setFactorTaskId] = useState("");
 
   const [factorId, setFactorId] = useState("intraday_formula");
   const [formula, setFormula] = useState("Rank(Ts_Mean(close, 20))");
@@ -45,10 +47,47 @@ export default function FactorsPage() {
   const [datasetVersion, setDatasetVersion] = useState("");
   const [multiMarketRunning, setMultiMarketRunning] = useState(false);
   const [multiMarketResult, setMultiMarketResult] = useState<FactorMultiMarketCompareResponse | null>(null);
+  const [multiMarketTaskId, setMultiMarketTaskId] = useState("");
   const [multiMarketStart, setMultiMarketStart] = useState("2023-01-01");
   const [multiMarketEnd, setMultiMarketEnd] = useState("2024-12-31");
   const [multiMarketUniverse, setMultiMarketUniverse] = useState("AAA,BBB,CCC,DDD");
   const [multiMarketMarkets, setMultiMarketMarkets] = useState<string[]>(["US", "JP"]);
+  const factorTaskEventRef = useRef("");
+  const multiMarketTaskEventRef = useRef("");
+
+  const sessionTaskScope = useMemo(() => (activeSessionId || "factors").trim(), [activeSessionId]);
+
+  const factorTask = useMemo(() => {
+    const byId = tasks.find((row) => String(row.task_id) === factorTaskId);
+    if (byId) return byId;
+    return tasks.find((row) => {
+      if (String(row.task_type) !== "factor.run") return false;
+      const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
+      return metaSession === sessionTaskScope;
+    }) ?? null;
+  }, [factorTaskId, sessionTaskScope, tasks]);
+
+  const factorTaskRunning = useMemo(() => {
+    if (!factorTask) return false;
+    const status = String(factorTask.status || "").toLowerCase();
+    return !["done", "error", "failed", "canceled"].includes(status);
+  }, [factorTask]);
+
+  const activeMultiMarketTask = useMemo(() => {
+    const byId = tasks.find((row) => String(row.task_id) === multiMarketTaskId);
+    if (byId) return byId;
+    return tasks.find((row) => {
+      if (String(row.task_type) !== "factor.multi_market_compare") return false;
+      const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
+      return metaSession === sessionTaskScope;
+    }) ?? null;
+  }, [multiMarketTaskId, sessionTaskScope, tasks]);
+
+  const activeMultiMarketTaskRunning = useMemo(() => {
+    if (!activeMultiMarketTask) return false;
+    const status = String(activeMultiMarketTask.status || "").toLowerCase();
+    return !["done", "error", "failed", "canceled"].includes(status);
+  }, [activeMultiMarketTask]);
 
   const loadDetail = useCallback(async (version: string) => {
     setActiveVersion(version);
@@ -82,10 +121,76 @@ export default function FactorsPage() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!factorTask) return;
+    const status = String(factorTask.status || "").toLowerCase();
+    const eventKey = `${factorTask.task_id}:${status}`;
+    if (factorTaskEventRef.current === eventKey) return;
+    factorTaskEventRef.current = eventKey;
+
+    if (status === "done") {
+      const result = factorTask.result && typeof factorTask.result === "object" ? (factorTask.result as Record<string, unknown>) : {};
+      const factorVersion = String(result.factor_version ?? "").trim();
+      const taskShort = String(factorTask.task_id).slice(0, 8);
+      pushToast("Factor computed", `Task ${taskShort} completed.`, "success");
+      void (async () => {
+        await load();
+        if (factorVersion) {
+          await loadDetail(factorVersion);
+        }
+      })();
+      return;
+    }
+    if (status === "error" || status === "failed" || status === "canceled") {
+      pushToast("Run factor failed", String(factorTask.error || factorTask.message || "Task failed"), "error");
+    }
+  }, [factorTask, load, loadDetail, pushToast]);
+
+  useEffect(() => {
+    if (!activeMultiMarketTask) return;
+    const status = String(activeMultiMarketTask.status || "").toLowerCase();
+    const eventKey = `${activeMultiMarketTask.task_id}:${status}`;
+    if (multiMarketTaskEventRef.current === eventKey) return;
+    multiMarketTaskEventRef.current = eventKey;
+
+    if (status === "done") {
+      const result =
+        activeMultiMarketTask.result && typeof activeMultiMarketTask.result === "object"
+          ? (activeMultiMarketTask.result as Record<string, unknown>)
+          : {};
+      const payload: FactorMultiMarketCompareResponse = {
+        compare_id: String(result.compare_id ?? ""),
+        requested_metrics: Array.isArray(result.requested_metrics)
+          ? result.requested_metrics.map((item) => String(item))
+          : [],
+        per_market_metrics: Array.isArray(result.per_market_metrics)
+          ? (result.per_market_metrics as FactorMultiMarketCompareResponse["per_market_metrics"])
+          : [],
+        per_market_decay_curves: Array.isArray(result.per_market_decay_curves)
+          ? (result.per_market_decay_curves as FactorMultiMarketCompareResponse["per_market_decay_curves"])
+          : [],
+        summary_insights: Array.isArray(result.summary_insights)
+          ? result.summary_insights.map((item) => String(item))
+          : [],
+        parent_task_id: String(activeMultiMarketTask.task_id),
+        child_task_ids: Array.isArray(result.child_task_ids)
+          ? result.child_task_ids.map((item) => String(item))
+          : [],
+      };
+      setMultiMarketResult(payload);
+      const taskShort = String(activeMultiMarketTask.task_id).slice(0, 8);
+      pushToast("Factor multi-market compare ready", `Task ${taskShort} completed.`, "success");
+      return;
+    }
+    if (status === "error" || status === "failed" || status === "canceled") {
+      pushToast("Run compare failed", String(activeMultiMarketTask.error || activeMultiMarketTask.message || "Task failed"), "error");
+    }
+  }, [activeMultiMarketTask, pushToast]);
+
   async function onRunFormula() {
     setRunning(true);
     try {
-      const resp = await api.runFactor({
+      const task = await api.submitFactorRun({
         dataset_version: datasetVersion || latestDatasetVersion || undefined,
         factor_id: factorId,
         formula,
@@ -101,10 +206,10 @@ export default function FactorsPage() {
           .split(",")
           .map((item) => item.trim())
           .filter(Boolean),
+        session_id: sessionTaskScope,
       });
-      pushToast("Factor computed", `factor_version=${resp.factor_version}`, "success");
-      await load();
-      await loadDetail(resp.factor_version);
+      setFactorTaskId(String(task.task_id));
+      pushToast("Task submitted", `Factor task ${String(task.task_id).slice(0, 8)} is running.`, "success");
     } catch (err) {
       pushToast("Run factor failed", err instanceof Error ? err.message : "Unknown error", "error");
     } finally {
@@ -132,7 +237,7 @@ export default function FactorsPage() {
     }
     setMultiMarketRunning(true);
     try {
-      const response = await api.compareFactorMultiMarket({
+      const task = await api.submitFactorMultiMarketCompare({
         factor_id: detail.factor_id,
         factor_versions: [detail.version],
         markets: multiMarketMarkets,
@@ -144,9 +249,11 @@ export default function FactorsPage() {
         end: multiMarketEnd,
         seed: 42,
         eval_metrics: ["IC", "RankIC", "decay", "coverage"],
+        session_id: sessionTaskScope,
       });
-      setMultiMarketResult(response);
-      pushToast("Factor multi-market compare ready", `compare_id=${response.compare_id}`, "success");
+      setMultiMarketTaskId(String(task.task_id));
+      setMultiMarketResult(null);
+      pushToast("Task submitted", `Compare task ${String(task.task_id).slice(0, 8)} is running.`, "success");
     } catch (err) {
       pushToast("Run compare failed", err instanceof Error ? err.message : "Unknown error", "error");
     } finally {
@@ -317,9 +424,20 @@ export default function FactorsPage() {
               placeholder={`dataset_version (optional, default latest: ${latestDatasetVersion ?? "n/a"})`}
               className="md:col-span-2"
             />
-            <Button onClick={onRunFormula} disabled={running} className="md:col-span-2">
-              {running ? "Computing..." : "Run And Save Factor"}
+            <Button onClick={onRunFormula} disabled={running || factorTaskRunning} className="md:col-span-2">
+              {running ? "Submitting..." : factorTaskRunning ? "Running..." : "Run And Save Factor"}
             </Button>
+            {factorTask ? (
+              <div className="md:col-span-2 rounded border border-muted/40 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
+                <p>
+                  task_id={String(factorTask.task_id)} | status={String(factorTask.status)} | progress=
+                  {Math.max(0, Math.min(100, Number(factorTask.progress ?? 0)))}%
+                </p>
+                <Link href={`/tasks?focus_task_id=${encodeURIComponent(String(factorTask.task_id))}`} className="text-primary underline">
+                  Open Tasks
+                </Link>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -512,11 +630,29 @@ export default function FactorsPage() {
                           </div>
                           <Button
                             onClick={onRunMultiMarket}
-                            disabled={multiMarketRunning || multiMarketMarkets.length < 2 || !detail}
+                            disabled={multiMarketRunning || activeMultiMarketTaskRunning || multiMarketMarkets.length < 2 || !detail}
                             className="mt-3"
                           >
-                            {multiMarketRunning ? "Comparing..." : "Run Multi-Market Compare"}
+                            {multiMarketRunning
+                              ? "Submitting..."
+                              : activeMultiMarketTaskRunning
+                                ? "Running..."
+                                : "Run Multi-Market Compare"}
                           </Button>
+                          {activeMultiMarketTask ? (
+                            <div className="mt-2 rounded border border-muted/40 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
+                              <p>
+                                task_id={String(activeMultiMarketTask.task_id)} | status={String(activeMultiMarketTask.status)} | progress=
+                                {Math.max(0, Math.min(100, Number(activeMultiMarketTask.progress ?? 0)))}%
+                              </p>
+                              <Link
+                                href={`/tasks?focus_task_id=${encodeURIComponent(String(activeMultiMarketTask.task_id))}`}
+                                className="text-primary underline"
+                              >
+                                Open Tasks
+                              </Link>
+                            </div>
+                          ) : null}
                         </div>
 
                         {!multiMarketResult ? (

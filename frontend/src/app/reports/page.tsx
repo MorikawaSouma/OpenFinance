@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { EmptyState } from "@/components/common/empty-state";
@@ -25,7 +25,7 @@ const STRATEGY_FAMILIES = ["trend", "mean_reversion", "value", "risk_parity"] as
 const REBALANCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
 
 export default function ReportsPage() {
-  const { runs, latestPipeline, loadingCore, pushToast, restoreTraceContext } = useWorkbench();
+  const { runs, latestPipeline, loadingCore, pushToast, restoreTraceContext, tasks, activeSessionId } = useWorkbench();
   const router = useRouter();
 
   const [runA, setRunA] = useState("");
@@ -37,6 +37,7 @@ export default function ReportsPage() {
 
   const [multiMarketLoading, setMultiMarketLoading] = useState(false);
   const [multiMarketResult, setMultiMarketResult] = useState<MultiMarketCompareResponse | null>(null);
+  const [multiMarketTaskId, setMultiMarketTaskId] = useState("");
   const [multiMarkets, setMultiMarkets] = useState<string[]>(["US", "JP"]);
   const [multiStrategyFamily, setMultiStrategyFamily] = useState("trend");
   const [multiRebalance, setMultiRebalance] = useState("weekly");
@@ -48,6 +49,7 @@ export default function ReportsPage() {
 
   const [robustnessLoading, setRobustnessLoading] = useState(false);
   const [robustnessResult, setRobustnessResult] = useState<RobustnessReport | null>(null);
+  const [robustnessTaskId, setRobustnessTaskId] = useState("");
   const [robustStrategyFamily, setRobustStrategyFamily] = useState("trend");
   const [robustRebalance, setRobustRebalance] = useState("weekly");
   const [robustLookback, setRobustLookback] = useState(20);
@@ -57,6 +59,9 @@ export default function ReportsPage() {
   const [robustCommission, setRobustCommission] = useState(5);
   const [robustSlippage, setRobustSlippage] = useState(8);
   const [robustMaxVariants, setRobustMaxVariants] = useState(8);
+  const multiMarketTaskEventRef = useRef("");
+  const robustnessTaskEventRef = useRef("");
+  const sessionTaskScope = useMemo(() => (activeSessionId || "reports").trim(), [activeSessionId]);
 
   const metricsRows = useMemo(() => {
     if (!reportA || !reportB) return [];
@@ -74,6 +79,86 @@ export default function ReportsPage() {
       };
     });
   }, [reportA, reportB]);
+
+  const multiMarketTask = useMemo(
+    () =>
+      tasks.find((row) => String(row.task_id) === multiMarketTaskId) ??
+      tasks.find((row) => {
+        if (String(row.task_type) !== "multi_market.compare") return false;
+        const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
+        return metaSession === sessionTaskScope;
+      }) ??
+      null,
+    [multiMarketTaskId, sessionTaskScope, tasks]
+  );
+  const robustnessTask = useMemo(
+    () =>
+      tasks.find((row) => String(row.task_id) === robustnessTaskId) ??
+      tasks.find((row) => {
+        if (String(row.task_type) !== "robustness.run") return false;
+        const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
+        return metaSession === sessionTaskScope;
+      }) ??
+      null,
+    [robustnessTaskId, sessionTaskScope, tasks]
+  );
+  const multiMarketTaskRunning = useMemo(() => {
+    if (!multiMarketTask) return false;
+    const status = String(multiMarketTask.status || "").toLowerCase();
+    return !["done", "error", "failed", "canceled"].includes(status);
+  }, [multiMarketTask]);
+  const robustnessTaskRunning = useMemo(() => {
+    if (!robustnessTask) return false;
+    const status = String(robustnessTask.status || "").toLowerCase();
+    return !["done", "error", "failed", "canceled"].includes(status);
+  }, [robustnessTask]);
+
+  useEffect(() => {
+    if (!multiMarketTask) return;
+    const status = String(multiMarketTask.status || "").toLowerCase();
+    const eventKey = `${multiMarketTask.task_id}:${status}`;
+    if (multiMarketTaskEventRef.current === eventKey) return;
+    multiMarketTaskEventRef.current = eventKey;
+    const result = multiMarketTask.result && typeof multiMarketTask.result === "object" ? (multiMarketTask.result as Record<string, unknown>) : {};
+    if (status === "done") {
+      const rowsRaw = Array.isArray(result.rows) ? result.rows : [];
+      const diffRaw = Array.isArray(result.diff_table) ? result.diff_table : [];
+      setMultiMarketResult({
+        compare_id: String(result.compare_id ?? ""),
+        baseline_market: String(result.baseline_market ?? ""),
+        strategy_spec: (result.strategy_spec && typeof result.strategy_spec === "object" ? result.strategy_spec : {}) as Record<string, unknown>,
+        rows: rowsRaw as MultiMarketCompareResponse["rows"],
+        diff_table: diffRaw as MultiMarketCompareResponse["diff_table"],
+        parent_task_id: String(multiMarketTask.task_id),
+        child_task_ids: [],
+        migration_warnings: [],
+        market_warnings: {},
+      });
+      return;
+    }
+    if (status === "error" || status === "failed" || status === "canceled") {
+      pushToast("Multi-market comparison failed", String(multiMarketTask.error || multiMarketTask.message || "Task failed"), "error");
+    }
+  }, [multiMarketTask, pushToast]);
+
+  useEffect(() => {
+    if (!robustnessTask) return;
+    const status = String(robustnessTask.status || "").toLowerCase();
+    const eventKey = `${robustnessTask.task_id}:${status}`;
+    if (robustnessTaskEventRef.current === eventKey) return;
+    robustnessTaskEventRef.current = eventKey;
+    const result = robustnessTask.result && typeof robustnessTask.result === "object" ? (robustnessTask.result as Record<string, unknown>) : {};
+    if (status === "done") {
+      const report = result.report;
+      if (report && typeof report === "object") {
+        setRobustnessResult(report as RobustnessReport);
+      }
+      return;
+    }
+    if (status === "error" || status === "failed" || status === "canceled") {
+      pushToast("Robustness analysis failed", String(robustnessTask.error || robustnessTask.message || "Task failed"), "error");
+    }
+  }, [pushToast, robustnessTask]);
 
   async function compareRuns() {
     if (!runA || !runB) {
@@ -117,7 +202,7 @@ export default function ReportsPage() {
     }
     setMultiMarketLoading(true);
     try {
-      const payload = await api.compareMultiMarket({
+      const task = await api.submitMultiMarketCompare({
         markets: multiMarkets,
         strategy_id: "multi_market_strategy",
         strategy_version: `mm-${multiStrategyFamily}-${multiRebalance}`,
@@ -135,9 +220,11 @@ export default function ReportsPage() {
         seed: 42,
         commission_bps: multiCommission,
         slippage_bps: multiSlippage,
+        session_id: sessionTaskScope,
       });
-      setMultiMarketResult(payload);
-      pushToast("Multi-market comparison complete", `Generated ${payload.rows.length} market run rows.`, "success");
+      setMultiMarketTaskId(String(task.task_id));
+      setMultiMarketResult(null);
+      pushToast("Task submitted", `Multi-market compare task ${String(task.task_id).slice(0, 8)} is running.`, "success");
     } catch (err) {
       setMultiMarketResult(null);
       pushToast("Multi-market comparison failed", err instanceof Error ? err.message : "Unknown error", "error");
@@ -154,7 +241,7 @@ export default function ReportsPage() {
     }
     setRobustnessLoading(true);
     try {
-      const payload = await api.runRobustness({
+      const task = await api.submitRobustness({
         dataset_version: latestDatasetVersion,
         strategy_id: "robustness_suite",
         strategy_version: `robust-${robustStrategyFamily}-${robustRebalance}`,
@@ -174,9 +261,11 @@ export default function ReportsPage() {
         slippage_bps: robustSlippage,
         cost_multipliers: [0.5, 1.0, 2.0],
         max_variants: robustMaxVariants,
+        session_id: sessionTaskScope,
       });
-      setRobustnessResult(payload);
-      pushToast("Robustness analysis complete", `Generated ${payload.summary.variant_count} variants.`, "success");
+      setRobustnessTaskId(String(task.task_id));
+      setRobustnessResult(null);
+      pushToast("Task submitted", `Robustness task ${String(task.task_id).slice(0, 8)} is running.`, "success");
     } catch (err) {
       setRobustnessResult(null);
       pushToast("Robustness analysis failed", err instanceof Error ? err.message : "Unknown error", "error");
@@ -322,10 +411,17 @@ export default function ReportsPage() {
               <input value={multiLookback} onChange={(e) => setMultiLookback(Number(e.target.value || 20))} type="number" min={2} max={252} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Lookback window" />
               <input value={multiStart} onChange={(e) => setMultiStart(e.target.value)} type="date" className="h-9 rounded-md border border-input bg-background px-3 text-sm" />
               <input value={multiEnd} onChange={(e) => setMultiEnd(e.target.value)} type="date" className="h-9 rounded-md border border-input bg-background px-3 text-sm" />
-              <Button onClick={runMultiMarketCompare} disabled={multiMarketLoading}>{multiMarketLoading ? "Comparing..." : "Run multi-market comparison"}</Button>
+              <Button onClick={runMultiMarketCompare} disabled={multiMarketLoading || multiMarketTaskRunning}>
+                {multiMarketLoading || multiMarketTaskRunning ? "Comparing..." : "Run multi-market comparison"}
+              </Button>
               <input value={multiCommission} onChange={(e) => setMultiCommission(Number(e.target.value || 0))} type="number" min={0} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Commission bps" />
               <input value={multiSlippage} onChange={(e) => setMultiSlippage(Number(e.target.value || 0))} type="number" min={0} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Slippage bps" />
             </div>
+            {multiMarketTask ? (
+              <p className="text-xs text-muted-foreground">
+                Task {String(multiMarketTask.task_id).slice(0, 8)} · {String(multiMarketTask.status)} · {Number(multiMarketTask.progress || 0)}%
+              </p>
+            ) : null}
             {!multiMarketResult ? (
               <EmptyState title="No multi-market comparison yet" description="Run comparison after selecting at least two markets." />
             ) : (
@@ -373,10 +469,15 @@ export default function ReportsPage() {
               <input value={robustCommission} onChange={(e) => setRobustCommission(Number(e.target.value || 0))} type="number" min={0} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Commission bps" />
               <input value={robustSlippage} onChange={(e) => setRobustSlippage(Number(e.target.value || 0))} type="number" min={0} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Slippage bps" />
               <input value={robustMaxVariants} onChange={(e) => setRobustMaxVariants(Number(e.target.value || 8))} type="number" min={6} max={24} className="h-9 rounded-md border border-input bg-background px-3 text-sm" placeholder="Max variants" />
-              <Button onClick={runRobustnessSuite} disabled={robustnessLoading} className="md:col-span-3">
-                {robustnessLoading ? "Running..." : "Run robustness suite"}
+              <Button onClick={runRobustnessSuite} disabled={robustnessLoading || robustnessTaskRunning} className="md:col-span-3">
+                {robustnessLoading || robustnessTaskRunning ? "Running..." : "Run robustness suite"}
               </Button>
             </div>
+            {robustnessTask ? (
+              <p className="text-xs text-muted-foreground">
+                Task {String(robustnessTask.task_id).slice(0, 8)} · {String(robustnessTask.status)} · {Number(robustnessTask.progress || 0)}%
+              </p>
+            ) : null}
             {!robustnessResult ? (
               <EmptyState title="No robustness report yet" description="Run robustness suite to generate variants." />
             ) : (

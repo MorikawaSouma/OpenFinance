@@ -33,7 +33,12 @@ export function subscribeEvents({
   const parseSseChunk = (chunk: string) => {
     const lines = chunk.split(/\r?\n/);
     const dataLines: string[] = [];
+    let eventId = "";
     for (const line of lines) {
+      if (line.startsWith("id:")) {
+        eventId = line.slice(3).trim();
+        continue;
+      }
       if (line.startsWith("data:")) {
         dataLines.push(line.slice(5).trimStart());
       }
@@ -41,6 +46,9 @@ export function subscribeEvents({
     if (dataLines.length === 0) return;
     try {
       const event = JSON.parse(dataLines.join("\n")) as SseEvent;
+      if (eventId && !event.event_id) {
+        event.event_id = eventId;
+      }
       onEvent(event);
     } catch {
       // ignore malformed payload

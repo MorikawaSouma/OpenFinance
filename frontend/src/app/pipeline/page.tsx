@@ -26,7 +26,7 @@ const stepOrder = [
 ];
 
 export default function PipelinePage() {
-  const { mode, latestPipeline, runPipeline, pushToast } = useWorkbench();
+  const { mode, latestPipeline, runPipeline, pushToast, tasks, activeSessionId } = useWorkbench();
   const [question, setQuestion] = useState(
     "Why is Nikkei volatility rising recently? Build a low-drawdown, high-Sharpe strategy."
   );
@@ -35,6 +35,7 @@ export default function PipelinePage() {
   const [autoAdjustForRules, setAutoAdjustForRules] = useState(false);
   const [confirmMigrationRisk, setConfirmMigrationRisk] = useState(false);
   const [running, setRunning] = useState(false);
+  const [pipelineTaskId, setPipelineTaskId] = useState("");
   const [preflightWarnings, setPreflightWarnings] = useState<
     Array<{
       market: string;
@@ -46,9 +47,34 @@ export default function PipelinePage() {
       variant_id?: string | null;
     }>
   >([]);
+  const sessionTaskScope = useMemo(() => (activeSessionId || "pipeline").trim(), [activeSessionId]);
+
+  const activePipelineTask = useMemo(() => {
+    const byId = tasks.find((row) => String(row.task_id) === pipelineTaskId);
+    if (byId) return byId;
+    return (
+      tasks.find((row) => {
+        if (String(row.task_type) !== "pipeline_run") return false;
+        const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
+        return metaSession === sessionTaskScope;
+      }) ?? null
+    );
+  }, [pipelineTaskId, sessionTaskScope, tasks]);
+  const taskPipelinePayload = useMemo(() => {
+    const result = activePipelineTask?.result && typeof activePipelineTask.result === "object" ? activePipelineTask.result : {};
+    const payload = (result as Record<string, unknown>).pipeline_response;
+    return payload && typeof payload === "object" ? (payload as typeof latestPipeline) : null;
+  }, [activePipelineTask, latestPipeline]);
+  const displayPipeline = taskPipelinePayload ?? latestPipeline;
+  const pipelineInProgress = useMemo(() => {
+    if (running) return true;
+    if (!activePipelineTask) return false;
+    const status = String(activePipelineTask.status || "").toLowerCase();
+    return !["done", "error", "failed", "canceled"].includes(status);
+  }, [activePipelineTask, running]);
 
   const frameworkSections = useMemo(() => {
-    const plan = latestPipeline?.research_plan;
+    const plan = displayPipeline?.research_plan;
     if (!plan) return [];
     return [
       { key: "value", label: "Value", payload: plan.value },
@@ -56,7 +82,7 @@ export default function PipelinePage() {
       { key: "stats", label: "Stats", payload: plan.stats },
       { key: "behavior", label: "Behavior", payload: plan.behavior },
     ];
-  }, [latestPipeline]);
+  }, [displayPipeline]);
 
   async function onRun() {
     setRunning(true);
@@ -79,14 +105,14 @@ export default function PipelinePage() {
         return;
       }
 
-      const result = await runPipeline(question, market, {
+      const task = await runPipeline(question, market, {
         planId: planPreview.plan_id,
         constraints,
         migrationPreflightConfirmed: confirmMigrationRisk,
         autoAdjustForMarketRules: autoAdjustForRules,
       });
-      setPreflightWarnings(result.preflight_warnings ?? warnings);
-      pushToast("Pipeline completed", `Run generated: ${result.run_id}`, "success");
+      setPipelineTaskId(String(task.task_id));
+      pushToast("Pipeline task submitted", `Task ${String(task.task_id).slice(0, 8)} is running.`, "success");
     } catch (err) {
       pushToast("Pipeline failed", err instanceof Error ? err.message : "Unknown error", "error");
     } finally {
@@ -95,16 +121,16 @@ export default function PipelinePage() {
   }
 
   async function exportAuditBundle() {
-    if (!latestPipeline) return;
+    if (!displayPipeline) return;
     try {
-      const logs = await api.getAudit(mode === "developer" ? latestPipeline.trace_id : undefined);
-      const blob = new Blob([JSON.stringify({ pipeline: latestPipeline, logs }, null, 2)], {
+      const logs = await api.getAudit(mode === "developer" ? displayPipeline.trace_id : undefined);
+      const blob = new Blob([JSON.stringify({ pipeline: displayPipeline, logs }, null, 2)], {
         type: "application/json",
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `audit_bundle_${latestPipeline.run_id}.json`;
+      a.download = `audit_bundle_${displayPipeline.run_id}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -121,7 +147,7 @@ export default function PipelinePage() {
             <CardDescription>Plan to evidence to factors to strategy to multi-run backtest.</CardDescription>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={exportAuditBundle} disabled={!latestPipeline}>
+            <Button variant="outline" onClick={exportAuditBundle} disabled={!displayPipeline}>
               <Download className="mr-1 h-4 w-4" />
               Export Audit Bundle
             </Button>
@@ -196,7 +222,7 @@ export default function PipelinePage() {
         </Card>
       ) : null}
 
-      {running ? (
+      {pipelineInProgress ? (
         <Card>
           <CardHeader>
             <CardTitle>Executing...</CardTitle>
@@ -210,7 +236,7 @@ export default function PipelinePage() {
         </Card>
       ) : null}
 
-      {!latestPipeline ? (
+      {!displayPipeline ? (
         <EmptyState title="No pipeline run yet" description="Run once to generate plan and experiment comparison." />
       ) : (
         <>
@@ -221,12 +247,12 @@ export default function PipelinePage() {
                 <CardDescription>Each step card expands input/output summary.</CardDescription>
               </div>
               <Button asChild variant="secondary">
-                <Link href={`/reports/${latestPipeline.run_id}`}>Open Run Report</Link>
+                <Link href={`/reports/${displayPipeline.run_id}`}>Open Run Report</Link>
               </Button>
             </CardHeader>
             <CardContent>
               <ol className="space-y-3">
-                {latestPipeline.steps.map((step, idx) => {
+                {displayPipeline.steps.map((step, idx) => {
                   const done = step.status === "done";
                   return (
                     <li key={`${step.name}-${idx}`} className="rounded-lg border p-3">
@@ -250,9 +276,9 @@ export default function PipelinePage() {
               <CardDescription>Question-specific objectives and four-lens framework.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2 text-xs text-muted-foreground">
-              <p>plan_id: {latestPipeline.plan_id}</p>
-              <p>objectives: {latestPipeline.research_plan.objectives.join(", ")}</p>
-              <p>families: {latestPipeline.research_plan.candidate_strategy_families.join(", ")}</p>
+              <p>plan_id: {displayPipeline.plan_id}</p>
+              <p>objectives: {displayPipeline.research_plan.objectives.join(", ")}</p>
+              <p>families: {displayPipeline.research_plan.candidate_strategy_families.join(", ")}</p>
               {frameworkSections.length > 0 ? (
                 <Tabs defaultValue="value">
                   <TabsList>

@@ -24,12 +24,18 @@ def _registry() -> LLMProviderRegistry:
 
 @router.get("/providers")
 def list_providers() -> list[dict[str, str]]:
+    if settings.llm_force_stub:
+        mode = "stub"
+    elif settings.llm_require_remote:
+        mode = "remote"
+    else:
+        mode = "remote" if settings.zhipu_api_key else "stub"
     return [
         {
             "name": "zhipu",
             "model": settings.zhipu_model,
             "default": "true",
-            "mode": "stub" if (settings.llm_force_stub or not settings.zhipu_api_key) else "remote",
+            "mode": mode,
         }
     ]
 

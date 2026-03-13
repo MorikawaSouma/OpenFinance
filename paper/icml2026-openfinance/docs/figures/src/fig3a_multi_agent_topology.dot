@@ -1,0 +1,125 @@
+digraph Fig3A_MultiAgentTopology {
+  graph [
+    rankdir=LR,
+    newrank=true,
+    bgcolor="white",
+    pad="0.6",
+    nodesep="0.65",
+    ranksep="0.75",
+    splines=ortho,
+    concentrate=true,
+    fontname="Helvetica",
+    fontsize=20,
+    labelloc="t",
+    label="Figure 3A. Multi-Agent Topology (Bus Aggregation)"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=12,
+    color="#CBD5E1",
+    penwidth=1.2,
+    fillcolor="#F8FAFC",
+    margin="0.14,0.10"
+  ];
+
+  edge [
+    fontname="Helvetica",
+    fontsize=11,
+    color="#334155",
+    penwidth=1.4,
+    arrowsize=0.85
+  ];
+
+  // Core nodes
+  evidencepack [label="EvidencePack", fillcolor="#ECFEFF", color="#0EA5A4"];
+  orchestrator [label="Agent\nOrchestrator", fillcolor="#DBEAFE", color="#2563EB"];
+  aggregator   [label="Aggregator", fillcolor="#E2E8F0", color="#64748B"];
+  outputs      [label="Machine-readable Outputs\n- ReasoningSteps\n- ToolContext\n- FactorSpec\n- StrategyDecision",
+                fillcolor="#F1F5F9", color="#64748B"];
+  pipeline_consume [label="Pipeline Consume\nfactor.define -> strategy.compose\n-> backtest -> compare",
+                    fillcolor="#E2E8F0", color="#64748B"];
+
+  // Buses
+  research_bus [label="Research Bus\n(collect 6 experts)", fillcolor="#F5F3FF", color="#7C3AED"];
+  ops_bus      [label="Ops Bus\n(collect 7 ops)", fillcolor="#F8FAFC", color="#64748B"];
+
+  // Counterfactual path
+  cf_retriever [label="Counterfactual\nRetriever", fillcolor="#FFF1F2", color="#E11D48", penwidth=1.2];
+
+  // Research group cluster (6)
+  subgraph cluster_research {
+    label="Research Group (6)";
+    fontcolor="#7C3AED";
+    color="#E9D5FF";
+    style="rounded,filled";
+    fillcolor="#F5F3FF";
+    penwidth=1.2;
+
+    buffett  [label="Buffett",  fillcolor="#F3E8FF", color="#7C3AED"];
+    soros    [label="Soros",    fillcolor="#F3E8FF", color="#7C3AED"];
+    simons   [label="Simons",   fillcolor="#F3E8FF", color="#7C3AED"];
+    dalio    [label="Dalio",    fillcolor="#F3E8FF", color="#7C3AED"];
+    kahneman [label="Kahneman", fillcolor="#FEE2E2", color="#E11D48", penwidth=1.2];
+    factorA  [label="Factor",   fillcolor="#F3E8FF", color="#7C3AED"];
+
+    {rank=same; buffett; soros;}
+    {rank=same; simons; dalio;}
+    {rank=same; kahneman; factorA;}
+  }
+
+  // Ops group cluster (7)
+  subgraph cluster_ops {
+    label="Ops Group (7)";
+    fontcolor="#64748B";
+    color="#E2E8F0";
+    style="rounded,filled";
+    fillcolor="#F8FAFC";
+    penwidth=1.2;
+
+    librarian  [label="Librarian",        fillcolor="#ECFEFF", color="#0EA5A4"];
+    dataeng    [label="DataEngineer",     fillcolor="#F1F5F9", color="#64748B"];
+    strategyA  [label="Strategy",         fillcolor="#DBEAFE", color="#2563EB"];
+    riskmgr    [label="RiskManager",      fillcolor="#FEF3C7", color="#D97706", penwidth=1.2];
+    compliance [label="ComplianceAudit",  fillcolor="#FEF3C7", color="#D97706", penwidth=1.2];
+    exec       [label="ExecutionTrader",  fillcolor="#F1F5F9", color="#64748B"];
+    codeA      [label="Code",             fillcolor="#F1F5F9", color="#64748B"];
+
+    {rank=same; librarian; dataeng; strategyA; riskmgr;}
+    {rank=same; compliance; exec; codeA;}
+  }
+
+  // Main flow (thick)
+  edge [penwidth=2.4, color="#334155", arrowsize=0.9];
+  evidencepack -> orchestrator;
+  orchestrator -> research_bus;
+  orchestrator -> ops_bus;
+  research_bus -> aggregator;
+  ops_bus      -> aggregator;
+  aggregator -> outputs;
+  outputs -> pipeline_consume;
+
+  // Minimal membership links to keep each group attached to its bus
+  edge [color="#CBD5E1", penwidth=1.0, arrowsize=0.0, style=solid];
+  factorA  -> research_bus;
+  strategyA -> ops_bus;
+
+  // Counterfactual highlight (only red dashed edges)
+  edge [color="#E11D48", penwidth=1.6, style=dashed, arrowsize=0.8, fontcolor="#E11D48"];
+  cf_retriever -> kahneman;
+  kahneman -> research_bus;
+
+  // Invisible constraints for left-right symmetry and stable placement
+  edge [style=invis, color="#FFFFFF", penwidth=0.1, arrowsize=0.0, constraint=true];
+  research_bus -> ops_bus;
+  factorA -> strategyA;
+
+  // Alignment
+  {rank=same; evidencepack; cf_retriever;}
+  {rank=same; orchestrator;}
+  {rank=same; buffett; librarian;}
+  {rank=same; factorA; strategyA;}
+  {rank=same; aggregator; outputs;}
+}

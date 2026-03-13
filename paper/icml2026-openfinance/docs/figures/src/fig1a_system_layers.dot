@@ -1,0 +1,143 @@
+digraph Fig1A_SystemLayers {
+  // ===== Global =====
+  graph [
+    rankdir=LR,
+    newrank=true,
+    bgcolor="white",
+    pad="0.6",
+    nodesep="0.55",
+    ranksep="0.55",
+    splines=true,
+    fontname="Helvetica",
+    fontsize=20,
+    labelloc="t",
+    label="Figure 1A. System Layers and Happy Path"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=12,
+    color="#CBD5E1",
+    penwidth=1.2,
+    fillcolor="#F8FAFC",
+    margin="0.12,0.08"
+  ];
+
+  edge [
+    fontname="Helvetica",
+    fontsize=11,
+    color="#334155",
+    penwidth=2.4,
+    arrowsize=0.85
+  ];
+
+  // ===== Lane labels (left) =====
+  lane_frontend [label="Frontend", shape=plaintext, fontcolor="#64748B", fontsize=12];
+  lane_api      [label="API", shape=plaintext, fontcolor="#64748B", fontsize=12];
+  lane_pipeline [label="Pipeline", shape=plaintext, fontcolor="#64748B", fontsize=12];
+  lane_engines  [label="Engines", shape=plaintext, fontcolor="#64748B", fontsize=12];
+  lane_storage  [label="Registry + Audit", shape=plaintext, fontcolor="#64748B", fontsize=12];
+
+  // ===== Row 1: Frontend =====
+  subgraph cluster_frontend {
+    label="Frontend Workspace";
+    fontcolor="#2563EB";
+    color="#DBEAFE";
+    penwidth=1.2;
+    style="rounded,filled";
+    fillcolor="#EFF6FF";
+
+    q [label="Question\n(User Input)", fillcolor="#E0F2FE", color="#0EA5A4", penwidth=1.2];
+  }
+
+  // ===== Row 2: API =====
+  subgraph cluster_api {
+    label="Backend API";
+    fontcolor="#2563EB";
+    color="#DBEAFE";
+    penwidth=1.2;
+    style="rounded,filled";
+    fillcolor="#EFF6FF";
+
+    chat_api [label="Chat API\n(/chat/message)", fillcolor="#E0F2FE", color="#2563EB"];
+    wb_api   [label="Workbench API\n(/tasks, /reports)", fillcolor="#E0F2FE", color="#2563EB"];
+  }
+
+  // ===== Row 3: Pipeline (Happy Path) =====
+  subgraph cluster_pipeline {
+    label="Research -> Quant Pipeline";
+    fontcolor="#2563EB";
+    color="#DBEAFE";
+    penwidth=1.2;
+    style="rounded,filled";
+    fillcolor="#EFF6FF";
+
+    plan     [label="Plan", fillcolor="#F1F5F9", color="#2563EB"];
+    evidence [label="Evidence", fillcolor="#ECFEFF", color="#0EA5A4"];
+    factor   [label="Factor", fillcolor="#F3E8FF", color="#7C3AED"];
+    strategy [label="Strategy", fillcolor="#F3E8FF", color="#7C3AED"];
+    backtest [label="Backtest", fillcolor="#F1F5F9", color="#64748B"];
+  }
+
+  // ===== Row 4: Engines (supporting, not mainline) =====
+  subgraph cluster_engines {
+    label="Engines (Supporting)";
+    fontcolor="#64748B";
+    color="#E2E8F0";
+    penwidth=1.2;
+    style="rounded,filled";
+    fillcolor="#F8FAFC";
+
+    orch   [label="Agent\nOrchestrator", fillcolor="#DBEAFE", color="#2563EB"];
+    ksvc   [label="Knowledge\nService (RAG)", fillcolor="#ECFEFF", color="#0EA5A4"];
+    fengine [label="FactorEngine\n+ Registry", fillcolor="#F3E8FF", color="#7C3AED"];
+    brunner [label="BacktestRunner\n+ MetaRunner", fillcolor="#F1F5F9", color="#64748B"];
+  }
+
+  // ===== Row 5: Registry/Audit =====
+  subgraph cluster_storage {
+    label="Artifacts & Governance";
+    fontcolor="#64748B";
+    color="#E2E8F0";
+    penwidth=1.2;
+    style="rounded,filled";
+    fillcolor="#F8FAFC";
+
+    report [label="Report\n(Artifacts)", fillcolor="#F1F5F9", color="#64748B"];
+    gate   [label="Risk Gate\n+ Approvals", fillcolor="#FEF3C7", color="#D97706", penwidth=1.2];
+    audit  [label="Audit Trace\n(trace_id)", fillcolor="#F1F5F9", color="#64748B"];
+  }
+
+  // ===== Lanes alignment =====
+  {rank=same; lane_frontend; q;}
+  {rank=same; lane_api; chat_api; wb_api;}
+  {rank=same; lane_pipeline; plan; evidence; factor; strategy; backtest;}
+  {rank=same; lane_engines; orch; ksvc; fengine; brunner;}
+  {rank=same; lane_storage; report; gate; audit;}
+
+  // ===== Mainline (thick) =====
+  q -> chat_api [label="request"];
+  chat_api -> plan;
+  plan -> evidence;
+  evidence -> factor;
+  factor -> strategy;
+  strategy -> backtest;
+  backtest -> report;
+  report -> gate;
+  gate -> audit;
+
+  // ===== Supporting edges (thin gray, minimal) =====
+  edge [color="#94A3B8", penwidth=1.2, arrowsize=0.75, fontcolor="#64748B"];
+
+  chat_api -> orch  [label="dispatch"];
+  orch -> ksvc      [label="retrieve"];
+  ksvc -> evidence  [label="pack"];
+  orch -> strategy  [label="decide"];
+  fengine -> factor [label="compute"];
+  brunner -> backtest [label="execute"];
+  report -> audit   [label="persist"];
+
+  // Keep layout tidy
+}

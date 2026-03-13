@@ -35,7 +35,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="min-w-0 flex-1">
           <Topbar onMobileMenu={() => setMobileOpen(true)} />
-          <main className="container relative z-10 mx-auto grid max-w-7xl gap-4 px-4 py-5 animate-rise-in">
+          <main className="container relative z-10 mx-auto grid max-w-7xl gap-4 px-4 py-6 animate-rise-in">
             {children}
           </main>
         </div>

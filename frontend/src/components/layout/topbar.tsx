@@ -26,7 +26,7 @@ export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
   }, []);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-border/80 bg-background/88 backdrop-blur-xl">
+    <header className="sticky top-0 z-30 border-b border-border/80 bg-background/86 backdrop-blur-xl">
       <div className="container mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
         <div className="flex min-w-0 items-center gap-2">
           <Button variant="outline" size="icon" className="xl:hidden" onClick={onMobileMenu}>
@@ -47,7 +47,7 @@ export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
           </Badge>
         </div>
 
-        <div className="surface-panel-soft flex items-center gap-2 px-2 py-1">
+        <div className="surface-panel-soft flex items-center gap-2 px-2 py-1.5">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm">

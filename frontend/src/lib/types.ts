@@ -2,11 +2,16 @@ export type Mode = "user" | "developer";
 
 export type TaskRecord = {
   task_id: string;
+  parent_task_id?: string | null;
   task_type: string;
   status: string;
   progress: number;
   message: string;
   result: Record<string, unknown>;
+  result_ref?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
   error?: string | null;
 };
 
@@ -96,6 +101,25 @@ export type FactorRunResponse = {
   report: Record<string, unknown>;
 };
 
+export type FactorRunRequest = {
+  dataset_version?: string;
+  factor_id: string;
+  factor_version?: string;
+  description?: string;
+  formula: string;
+  availability_lag: string;
+  inputs: string[];
+  failure_conditions: Array<string | Record<string, unknown>>;
+  cost_sensitivity_level: string;
+  cost_sensitivity_rationale: string;
+  expected_horizon?: string;
+  lookback_days?: number;
+  decay_lags?: number;
+  universe?: string[];
+  seed?: number;
+  session_id?: string;
+};
+
 export type FactorMultiMarketCompareRequest = {
   factor_id?: string;
   factor_versions?: string[];
@@ -107,6 +131,7 @@ export type FactorMultiMarketCompareRequest = {
   end?: string;
   seed?: number;
   eval_metrics?: string[];
+  session_id?: string;
 };
 
 export type FactorMarketMetricRow = {
@@ -141,11 +166,14 @@ export type FactorMultiMarketCompareResponse = {
   per_market_metrics: FactorMarketMetricRow[];
   per_market_decay_curves: FactorMarketDecayCurve[];
   summary_insights: string[];
+  parent_task_id?: string | null;
+  child_task_ids?: string[];
 };
 
 export type BacktestReport = {
   run_id: string;
   dataset_version: string;
+  market?: string;
   strategy_version: string;
   strategy_decision?: Record<string, unknown>;
   factor_versions: Array<{
@@ -232,6 +260,7 @@ export type RiskStatus = {
   max_account_drawdown_limit?: number;
   abnormal_volatility_limit?: number;
   recent_risk_events?: RiskEventRow[];
+  updated_at?: string;
 };
 
 export type RiskEventRow = {
@@ -296,10 +325,58 @@ export type ChatSessionSummary = {
 export type ChatResponse = {
   session_id: string;
   trace_id: string;
+  message_id: string;
+  mode: "general_info_query" | "market_compare" | "pipeline_research" | "modify_last_run" | "session_compare" | string;
+  language: "zh" | "en" | string;
   assistant_message: string;
   evidence_pack_id: string;
-  cards: Record<string, { summary: string; items: string[] }>;
-  developer_payload: Record<string, unknown>;
+  risk_snapshot?: {
+    live_lock_status: string;
+    kill_switch: boolean;
+    drawdown: number;
+    volatility: number;
+    limits: Record<string, number>;
+    risk_level: string;
+    live_trading_enabled: boolean;
+    paper_trading_enabled: boolean;
+    updated_at: string;
+  } | null;
+  approvals_snapshot?: {
+    items: Array<{
+      request_id: string;
+      status: string;
+      created_at: string;
+      target: string;
+      use_case?: string | null;
+      plan_id?: string | null;
+    }>;
+    updated_at: string;
+  } | null;
+  cards: Array<{
+    card_id?: string | null;
+    type:
+      | "summary"
+      | "drivers"
+      | "watch"
+      | "metrics"
+      | "evidence"
+      | "comparison_table"
+      | "key_differences"
+      | "confidence"
+      | "diff"
+      | "next_steps"
+      | "risks"
+      | string;
+    title: string;
+    content?: string | null;
+    subtitle?: string | null;
+    metrics?: Array<{ name: string; value?: string | number | null; delta?: string | number | null }>;
+    items?: Array<Record<string, unknown> | string>;
+    highlights?: string[];
+    table?: Array<Record<string, string | number | null>>;
+    actions?: Array<{ label: string; action: string; payload?: Record<string, unknown> }>;
+  }>;
+  debug: Record<string, unknown>;
   turns: ChatTurn[];
 };
 
@@ -360,6 +437,7 @@ export type PreflightWarning = {
 export type ResearchPlan = {
   plan_id: string;
   question: string;
+  market?: string;
   markets: string[];
   objectives: string[];
   constraints: Record<string, unknown>;
@@ -374,6 +452,7 @@ export type ResearchPlan = {
   candidate_strategy_families: string[];
   experiment_matrix: Array<{
     variant_id: string;
+    market?: string;
     strategy_family: string;
     rebalance: string;
     lookback_days: number;
@@ -428,6 +507,7 @@ export type ExperimentResult = {
 export type PipelineResponse = {
   trace_id: string;
   question: string;
+  market?: string;
   plan_id: string;
   evidence_pack_id: string;
   evidence_sources: Array<Record<string, unknown>>;
@@ -444,6 +524,7 @@ export type PipelineResponse = {
   comparison_table: Array<Record<string, unknown>>;
   interpretation: string;
   agent_outputs: Array<Record<string, unknown>>;
+  reasoning_steps: Array<Record<string, unknown>>;
   preflight_warnings: PreflightWarning[];
   preflight_actions: string[];
   llm_mode: string;
@@ -478,6 +559,7 @@ export type MultiMarketCompareRequest = {
   seed: number;
   commission_bps: number;
   slippage_bps: number;
+  session_id?: string;
 };
 
 export type MultiMarketCompareRow = {
@@ -502,6 +584,8 @@ export type MultiMarketCompareResponse = {
   strategy_spec: Record<string, unknown>;
   rows: MultiMarketCompareRow[];
   diff_table: Array<Record<string, number | string>>;
+  parent_task_id?: string | null;
+  child_task_ids?: string[];
   migration_warnings: MigrationWarning[];
   market_warnings: Record<string, MigrationWarning[]>;
 };
@@ -529,6 +613,7 @@ export type RobustnessRunRequest = {
   threshold_grid?: number[];
   rebalance_grid?: string[];
   max_variants?: number;
+  session_id?: string;
 };
 
 export type RobustnessVariant = {
@@ -593,6 +678,9 @@ export type RobustnessReport = {
   strategy_id: string;
   strategy_version: string;
   market: string;
+  parent_task_id?: string | null;
+  child_task_ids?: string[];
+  summary_report_ref?: string | null;
   created_at: string;
   variants: RobustnessVariant[];
   summary: RobustnessSummary;
@@ -604,6 +692,7 @@ export type RobustnessReport = {
 };
 
 export type SseEvent = {
+  event_id?: string;
   type: string;
   trace_id: string;
   session_id: string;

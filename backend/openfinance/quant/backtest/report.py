@@ -71,6 +71,7 @@ class PositionSnapshot(BaseModel):
 class BacktestReport(BaseModel):
     run_id: UUID = Field(default_factory=uuid4)
     dataset_version: str
+    market: str = "US"
     strategy_version: str
     strategy_decision: dict[str, Any] = Field(default_factory=dict)
     factor_versions: list[FactorVersionRef] = Field(default_factory=list)

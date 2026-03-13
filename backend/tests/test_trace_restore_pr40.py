@@ -1,4 +1,4 @@
-from uuid import uuid4
+﻿from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -11,7 +11,7 @@ def _create_pipeline_run(client: TestClient) -> dict:
     resp = client.post(
         "/pipeline/run",
         json={
-            "question": "给我一套可执行趋势策略并做三组实验",
+            "question": "Give me an executable trend strategy and run three experiment variants",
             "market": "US",
             "run_paper_trade": False,
             "experiments": 3,
@@ -43,12 +43,14 @@ def test_pr40_restore_trace_supports_modify_rerun() -> None:
         "/chat/message",
         json={
             "session_id": session_state["session_id"],
-            "message": "成本翻倍再跑一次",
+            "message": "Double cost and run again.",
+            "include_debug": True,
         },
     )
     assert chat_resp.status_code == 200
     chat_payload = chat_resp.json()
-    dev_payload = chat_payload.get("developer_payload", {})
+    dev_payload = chat_payload.get("debug", {})
+    assert chat_payload["mode"] == "modify_last_run"
     assert dev_payload.get("intent") == "modify_last_run"
     assert str(dev_payload.get("old_run_id")) == run_id
     assert str(dev_payload.get("run_id")) != run_id

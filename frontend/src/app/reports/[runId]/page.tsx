@@ -211,6 +211,7 @@ export default function ReportDetailPage() {
         <div className="grid gap-2 text-sm md:grid-cols-2">
           <p>run_id: <span className="font-medium">{report.run_id}</span></p>
           <p>dataset_version: <span className="font-medium">{report.dataset_version}</span></p>
+          <p>market: <span className="font-medium">{String(report.market ?? "-")}</span></p>
           <p>strategy_version: <span className="font-medium">{report.strategy_version}</span></p>
           <p>strategy_decision_selected: <span className="font-medium">{String(strategyDecisionSelected?.name ?? "n/a")}</span></p>
           <p>created_at: <span className="font-medium">{new Date(report.created_at).toLocaleString()}</span></p>

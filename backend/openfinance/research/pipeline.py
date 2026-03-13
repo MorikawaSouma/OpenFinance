@@ -1,8 +1,11 @@
 import hashlib
 import json
 import re
+import traceback
 from datetime import date
-from typing import Any, Literal
+from threading import Event, Thread
+from time import perf_counter
+from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -49,6 +52,7 @@ class FactorCandidate(BaseModel):
 
 class ExperimentVariant(BaseModel):
     variant_id: str
+    market: str | None = None
     strategy_family: str
     rebalance: str
     lookback_days: int = Field(ge=2, le=252)
@@ -72,6 +76,7 @@ class ResearchSection(BaseModel):
 class ResearchPlan(BaseModel):
     plan_id: str
     question: str
+    market: str = "US"
     markets: list[str]
     objectives: list[str]
     constraints: dict[str, Any] = Field(default_factory=dict)
@@ -195,6 +200,7 @@ class ExperimentResult(BaseModel):
 class PipelineResponse(BaseModel):
     trace_id: str
     question: str
+    market: str = "US"
     plan_id: str
     evidence_pack_id: str
     evidence_sources: list[dict[str, Any]] = Field(default_factory=list)
@@ -214,6 +220,7 @@ class PipelineResponse(BaseModel):
     interpretation: str = ""
     paper_trade_result: dict[str, Any] | None = None
     agent_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    reasoning_steps: list[dict[str, Any]] = Field(default_factory=list)
     preflight_warnings: list[PreflightWarning] = Field(default_factory=list)
     preflight_actions: list[str] = Field(default_factory=list)
     llm_mode: str = "stub"
@@ -227,6 +234,8 @@ class MigrationPreflightBlockedError(ValueError):
 
 
 PlanCreateResponse.model_rebuild()
+
+PipelineProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
 class ResearchPipelineEngine:
@@ -270,6 +279,39 @@ class ResearchPipelineEngine:
             knowledge_service=self.knowledge,
         )
 
+    def _normalize_market(self, market: str | None, *, default: str | None = None) -> str:
+        raw = str(market or "").strip().upper()
+        alias = {
+            "JAPAN": "JP",
+            "NIKKEI": "JP",
+            "CHINA": "CN",
+            "A-SHARE": "CN",
+            "A_SHARE": "CN",
+            "A SHARE": "CN",
+            "U.S.": "US",
+            "U.S": "US",
+            "USA": "US",
+            "BTC": "CRYPTO",
+        }.get(raw)
+        normalized = alias or raw
+        if normalized in {"US", "CN", "JP", "CRYPTO"}:
+            return normalized
+        fallback = str(default or settings.default_market or "US").strip().upper()
+        if fallback in {"US", "CN", "JP", "CRYPTO"}:
+            return fallback
+        return "US"
+
+    def _plan_market(self, plan: ResearchPlan, *, default: str | None = None) -> str:
+        first = str((plan.markets or [""])[0]) if isinstance(plan.markets, list) else ""
+        return self._normalize_market(plan.market or first, default=default)
+
+    def _lock_plan_market(self, plan: ResearchPlan, market: str) -> None:
+        locked = self._normalize_market(market)
+        plan.market = locked
+        plan.markets = [locked]
+        for variant in plan.experiment_matrix:
+            variant.market = locked
+
     def create_plan(self, request: PlanCreateRequest) -> PlanCreateResponse:
         trace_id = str(uuid4())
         self._emit("task.created", trace_id, {"stage": "plan.start", "question": request.question})
@@ -282,6 +324,7 @@ class ResearchPipelineEngine:
             {
                 "plan_id": plan.plan_id,
                 "question": plan.question,
+                "market": plan.market,
                 "markets": plan.markets,
                 "objectives": plan.objectives,
                 "constraints": plan.constraints,
@@ -306,16 +349,31 @@ class ResearchPipelineEngine:
             llm_mode=llm_mode,
         )
 
-    def run(self, request: PipelineRequest) -> PipelineResponse:
-        trace_id = str(uuid4())
+    def run(
+        self,
+        request: PipelineRequest,
+        *,
+        trace_id: str | None = None,
+        progress_callback: PipelineProgressCallback | None = None,
+    ) -> PipelineResponse:
+        trace_id = trace_id or str(uuid4())
+        field_set = getattr(request, "model_fields_set", set()) or set()
+        explicit_market = "market" in field_set and str(request.market or "").strip()
+        request_market = self._normalize_market(request.market)
         if request.plan_id:
             raw = self.plan_registry.get_plan_payload(request.plan_id)
             if raw is None:
                 raise ValueError(f"plan_id not found: {request.plan_id}")
+            raw_market = (
+                str((raw.get("markets") or [raw.get("market") or request_market])[0])
+                if isinstance(raw.get("markets"), list)
+                else str(raw.get("market") or request_market)
+            )
+            locked_market = self._normalize_market(request_market if explicit_market else raw_market, default=raw_market)
             normalized_raw, schema_validation_errors = self._normalize_framework_sections(
                 dict(raw),
                 question=str(raw.get("question") or request.question or ""),
-                market=str((raw.get("markets") or [request.market])[0] if isinstance(raw.get("markets"), list) else request.market),
+                market=locked_market,
                 profile=self._detect_profile(str(raw.get("question") or request.question or "")),
             )
             if schema_validation_errors:
@@ -329,6 +387,7 @@ class ResearchPipelineEngine:
                     },
                 )
             plan = ResearchPlan.model_validate(normalized_raw)
+            self._lock_plan_market(plan, locked_market)
             llm_mode = "cached_plan"
             evidence = self._build_evidence_pack(plan, trace_id)
         else:
@@ -341,7 +400,12 @@ class ResearchPipelineEngine:
                 constraints=request.constraints,
                 seed=request.seed,
             )
-            plan, evidence, llm_mode = self._build_research_plan(plan_req, trace_id)
+            plan, evidence, llm_mode = self._build_research_plan(
+                plan_req,
+                trace_id,
+                progress_callback=progress_callback,
+            )
+            self._lock_plan_market(plan, request_market)
             self.plan_registry.append(plan)
 
         if request.max_drawdown_target:
@@ -374,24 +438,64 @@ class ResearchPipelineEngine:
             )
         if has_block and (not request.migration_preflight_confirmed):
             raise MigrationPreflightBlockedError(preflight_warnings)
-        self._emit("task.created", trace_id, {"stage": "pipeline.start", "plan_id": plan.plan_id})
-        return self._execute_plan(
-            plan=plan,
-            evidence=evidence,
-            trace_id=trace_id,
-            run_paper_trade=request.run_paper_trade,
-            preflight_warnings=preflight_warnings,
-            preflight_actions=preflight_actions,
-            llm_mode=llm_mode,
-            response_language=request.response_language,
+        self._emit(
+            "task.created",
+            trace_id,
+            {"stage": "pipeline.start", "plan_id": plan.plan_id, "market": self._plan_market(plan)},
         )
+        if progress_callback:
+            progress_callback(
+                "task.progress",
+                {
+                    "stage": "pipeline.start",
+                    "status": "running",
+                    "market": self._plan_market(plan),
+                    "plan_id": plan.plan_id,
+                    "completed_variants": 0,
+                    "total_variants": len(plan.experiment_matrix),
+                },
+            )
+        try:
+            return self._execute_plan(
+                plan=plan,
+                evidence=evidence,
+                trace_id=trace_id,
+                run_paper_trade=request.run_paper_trade,
+                preflight_warnings=preflight_warnings,
+                preflight_actions=preflight_actions,
+                llm_mode=llm_mode,
+                response_language=request.response_language,
+                progress_callback=progress_callback,
+            )
+        except Exception as ex:
+            if progress_callback:
+                progress_callback(
+                    "task.error",
+                    {
+                        "stage": "pipeline.failed",
+                        "market": self._plan_market(plan),
+                        "plan_id": plan.plan_id,
+                        "error_message": str(ex),
+                        "stacktrace": traceback.format_exc(),
+                    },
+                )
+            raise
 
     def _build_research_plan(
-        self, request: PlanCreateRequest, trace_id: str
+        self,
+        request: PlanCreateRequest,
+        trace_id: str,
+        *,
+        progress_callback: PipelineProgressCallback | None = None,
     ) -> tuple[ResearchPlan, EvidencePack, str]:
+        def _notify(event_type: str, payload: dict[str, Any]) -> None:
+            self._emit(event_type, trace_id, payload)
+            if progress_callback:
+                progress_callback(event_type, payload)
+
         profile = self._detect_profile(request.question)
         seed = request.seed if request.seed is not None else self._seed_from_question(request.question)
-        market = request.market or self._infer_market(request.question)
+        market = self._normalize_market(request.market or self._infer_market(request.question))
         base = self._profile_template(profile=profile, question=request.question, market=market)
         if request.objectives:
             base["objectives"] = request.objectives
@@ -423,6 +527,7 @@ class ResearchPipelineEngine:
         plan = ResearchPlan(
             plan_id=plan_id,
             question=request.question,
+            market=market,
             markets=[market],
             objectives=base["objectives"],
             constraints=base["constraints"],
@@ -441,33 +546,116 @@ class ResearchPipelineEngine:
             stats=ResearchSection.model_validate(base["stats"]),
             behavior=ResearchSection.model_validate(base["behavior"]),
         )
+        self._lock_plan_market(plan, market)
         evidence = self._build_evidence_pack(plan, trace_id)
-        orch = self.orchestrator.handle(
-            OrchestratorRequest(
-                prompt=request.question,
-                question=request.question,
-                active_agents=["Buffett", "Soros", "Simons", "Dalio", "Kahneman", "Factor"],
-                tool_calls=[
-                    "read_dataset_versions",
-                    "read_run_versions",
-                    "read_market_rules",
-                    "read_risk_controls",
-                ],
-                evidence_pack_id=str(evidence.evidence_pack_id),
-                evidence_pack=evidence,
-                market_context={
-                    "market": market,
-                    "objectives": plan.objectives,
-                    "plan_id": plan.plan_id,
-                },
-                constraints=plan.constraints,
-                developer_mode=True,
-            )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "plan.compose",
+                "market": market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "research_plan",
+                "artifact_id": plan.plan_id,
+                "open_path": f"/plan/{plan.plan_id}",
+            },
         )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "evidence.pack",
+                "market": market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "evidence_pack",
+                "artifact_id": str(evidence.evidence_pack_id),
+                "open_path": "/evidence",
+            },
+        )
+
+        heartbeat_stop = Event()
+        heartbeat_started = perf_counter()
+
+        def _heartbeat_loop() -> None:
+            while not heartbeat_stop.wait(1.5):
+                _notify(
+                    "task.heartbeat",
+                    {
+                        "stage": "agent.reasoning",
+                        "status": "running",
+                        "market": market,
+                        "plan_id": plan.plan_id,
+                        "completed_variants": 0,
+                        "total_variants": len(plan.experiment_matrix),
+                        "elapsed_ms": int((perf_counter() - heartbeat_started) * 1000),
+                        "status_text": "orchestrator reasoning in progress",
+                    },
+                )
+
+        heartbeat_thread = Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
+        try:
+            orch = self.orchestrator.handle(
+                OrchestratorRequest(
+                    prompt=request.question,
+                    question=request.question,
+                    active_agents=["Buffett", "Soros", "Simons", "Dalio", "Kahneman", "Factor"],
+                    tool_calls=[
+                        "read_dataset_versions",
+                        "read_run_versions",
+                        "read_market_rules",
+                        "read_risk_controls",
+                    ],
+                    evidence_pack_id=str(evidence.evidence_pack_id),
+                    evidence_pack=evidence,
+                    market_context={
+                        "market": market,
+                        "objectives": plan.objectives,
+                        "plan_id": plan.plan_id,
+                    },
+                    constraints=plan.constraints,
+                    developer_mode=True,
+                    force_reasoning_parse_error=bool(settings.agent_force_step_parse_error),
+                    event_callback=lambda event_type, payload: _notify(
+                        event_type,
+                        {
+                            **payload,
+                            "stage": "agent.reasoning",
+                            "market": market,
+                            "plan_id": plan.plan_id,
+                            "completed_variants": 0,
+                            "total_variants": len(plan.experiment_matrix),
+                        },
+                    ),
+                )
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=0.05)
+            _notify(
+                "task.heartbeat",
+                {
+                    "stage": "agent.reasoning",
+                    "status": "done",
+                    "market": market,
+                    "plan_id": plan.plan_id,
+                    "completed_variants": 0,
+                    "total_variants": len(plan.experiment_matrix),
+                    "elapsed_ms": int((perf_counter() - heartbeat_started) * 1000),
+                    "status_text": "orchestrator reasoning completed",
+                },
+            )
         plan.agent_consensus = orch.summary
         plan.tool_context = {
             "tool_results": orch.tool_results,
             "agent_outputs": [row.model_dump(mode="json") for row in orch.outputs],
+            "reasoning_steps_by_agent": {
+                key: [step.model_dump(mode="json") for step in rows]
+                for key, rows in orch.reasoning_steps.items()
+            },
+            "reasoning_steps": [
+                step.model_dump(mode="json")
+                for rows in orch.reasoning_steps.values()
+                for step in rows
+            ],
         }
         return plan, evidence, llm_mode
 
@@ -482,7 +670,70 @@ class ResearchPipelineEngine:
         preflight_actions: list[str],
         llm_mode: str,
         response_language: Literal["en", "zh"],
+        progress_callback: PipelineProgressCallback | None = None,
     ) -> PipelineResponse:
+        def _notify(event_type: str, payload: dict[str, Any]) -> None:
+            self._emit(event_type, trace_id, payload)
+            if progress_callback:
+                progress_callback(event_type, payload)
+
+        def _run_with_heartbeat(
+            *,
+            stage: str,
+            status_text: str,
+            variant_id: str = "",
+            variant_index: int = 0,
+            total_variants: int = 1,
+            completed_variants: int = 0,
+            fn: Callable[[], Any],
+        ) -> Any:
+            stop = Event()
+            started = perf_counter()
+
+            def _loop() -> None:
+                while not stop.wait(1.5):
+                    _notify(
+                        "task.heartbeat",
+                        {
+                            "stage": stage,
+                            "status": "running",
+                            "status_text": status_text,
+                            "market": plan_market,
+                            "plan_id": plan.plan_id,
+                            "variant_id": variant_id,
+                            "variant_index": variant_index,
+                            "completed_variants": completed_variants,
+                            "total_variants": total_variants,
+                            "elapsed_ms": int((perf_counter() - started) * 1000),
+                        },
+                    )
+
+            t = Thread(target=_loop, daemon=True)
+            t.start()
+            try:
+                return fn()
+            finally:
+                stop.set()
+                t.join(timeout=0.05)
+                _notify(
+                    "task.heartbeat",
+                    {
+                        "stage": stage,
+                        "status": "done",
+                        "status_text": status_text,
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant_id,
+                        "variant_index": variant_index,
+                        "completed_variants": completed_variants,
+                        "total_variants": total_variants,
+                        "elapsed_ms": int((perf_counter() - started) * 1000),
+                    },
+                )
+
+        plan_market = self._plan_market(plan)
+        total_variants = len(plan.experiment_matrix)
+        completed_variants = 0
         steps: list[PipelineStep] = []
         steps.append(
             PipelineStep(
@@ -507,98 +758,351 @@ class ResearchPipelineEngine:
                     artifacts=[row.code for row in preflight_warnings],
                 )
             )
+        _notify(
+            "task.progress",
+            {
+                "stage": "plan.compose",
+                "status": "done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "plan.compose",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "research_plan",
+                "artifact_id": plan.plan_id,
+                "open_path": f"/plan/{plan.plan_id}",
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
         self._stage_evidence(plan, trace_id, steps, evidence)
+        _notify(
+            "task.progress",
+            {
+                "stage": "evidence.pack",
+                "status": "done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "evidence.pack",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "evidence_pack",
+                "artifact_id": str(evidence.evidence_pack_id),
+                "open_path": "/evidence",
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
         dataset_version = self._stage_dataset(plan, trace_id, steps)
+        _notify(
+            "task.progress",
+            {
+                "stage": "dataset.prepare",
+                "status": "done",
+                "market": plan_market,
+                "dataset_version": dataset_version,
+                "plan_id": plan.plan_id,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "dataset.prepare",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "dataset",
+                "artifact_id": dataset_version,
+                "open_path": f"/datasets/{dataset_version}",
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
 
         experiments: list[ExperimentResult] = []
-        for variant in plan.experiment_matrix:
-            factor_spec, factor_version = self._build_factor_spec(plan, variant)
-            factor_result = self.factor_engine.run(
-                factor_spec=factor_spec,
-                dataset_version=dataset_version,
-                factor_version=factor_version,
-                seed=plan.seed,
-            )
-            factor_report_payload = factor_result.report.model_dump(mode="json")
-            strategy_decision = self.strategy_agent.decide(
-                question=plan.question,
-                market=plan.markets[0],
-                research_plan=plan.model_dump(mode="json"),
-                factor_health_report=factor_report_payload,
-                constraints=plan.constraints,
-                market_rules=self._market_rules_payload(plan.markets[0]),
-                risk_budget=variant.risk_budget,
-                variant=variant.model_dump(mode="json"),
-            )
-            strategy_spec = self._build_strategy_spec(
-                plan,
-                variant,
-                factor_result.factor_version,
-                strategy_decision=strategy_decision,
-            )
-            backtest_request = self._build_backtest_request(
-                plan=plan,
-                variant=variant,
-                strategy_spec=strategy_spec,
-                dataset_version=dataset_version,
-                evidence=evidence,
-                factor_id=factor_result.factor_id,
-                factor_version=factor_result.factor_version,
-                factor_artifact_path=factor_result.artifact_path,
-                factor_failure_conditions=factor_spec.failure_conditions,
-                strategy_decision=strategy_decision,
-            )
-            report = self.runner.run(backtest_request)
-            score = self._score_objective(report.metrics, plan.objectives)
-            result = ExperimentResult(
-                variant_id=variant.variant_id,
-                strategy_family=variant.strategy_family,
-                factor_version=factor_result.factor_version,
-                strategy_version=strategy_spec.strategy_version,
-                run_id=str(report.run_id),
-                dataset_version=dataset_version,
-                objective_score=score,
-                metrics=report.metrics,
-                factor_report=factor_result.report.model_dump(mode="json"),
-                factor_artifact_path=factor_result.artifact_path,
-                factor_cached=factor_result.cached,
-                strategy_spec=strategy_spec.model_dump(mode="json"),
-                strategy_decision=strategy_decision.model_dump(mode="json"),
-                backtest_request=backtest_request.model_dump(mode="json"),
-                why_selected=strategy_decision.selected.rationale or variant.notes or strategy_spec.rationale,
-            )
-            experiments.append(result)
-            self._audit(
-                trace_id,
-                "pipeline.experiment.done",
-                {
-                    "plan_id": plan.plan_id,
-                    "variant_id": variant.variant_id,
-                    "factor_spec": factor_spec.model_dump(mode="json"),
-                    "factor_report": factor_result.report.model_dump(mode="json"),
-                    "factor_artifact_path": factor_result.artifact_path,
-                    "factor_health_report_artifact_path": factor_result.report.health_report_artifact_path,
-                    "factor_cached": factor_result.cached,
-                    "strategy_spec": strategy_spec.model_dump(mode="json"),
-                    "strategy_decision": strategy_decision.model_dump(mode="json"),
-                    "backtest_request": backtest_request.model_dump(mode="json"),
-                    "evidence_pack_id": str(evidence.evidence_pack_id),
-                    "metrics": report.metrics,
-                },
-                report.run_id,
-            )
-            self._audit(
-                trace_id,
-                "strategy.decision.selected",
-                {
-                    "plan_id": plan.plan_id,
-                    "variant_id": variant.variant_id,
-                    "selected": strategy_decision.selected.model_dump(mode="json"),
-                    "candidates": [row.model_dump(mode="json") for row in strategy_decision.candidates],
-                    "llm_mode": strategy_decision.llm_mode,
-                },
-                report.run_id,
-            )
+        for variant_index, variant in enumerate(plan.experiment_matrix, start=1):
+            try:
+                _notify(
+                    "task.variant_started",
+                    {
+                        "stage": "variant.start",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                        "strategy_family": variant.strategy_family,
+                    },
+                )
+                _notify(
+                    "task.progress",
+                    {
+                        "stage": "variant.factor",
+                        "status": "running",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                    },
+                )
+                if settings.pipeline_force_variant_error and variant_index == 1:
+                    raise RuntimeError("forced pipeline variant failure via OPENFINANCE_PIPELINE_FORCE_VARIANT_ERROR=true")
+
+                factor_spec, factor_version = self._build_factor_spec(plan, variant)
+                factor_result = _run_with_heartbeat(
+                    stage="variant.factor",
+                    status_text="computing factor and health report",
+                    variant_id=variant.variant_id,
+                    variant_index=variant_index,
+                    completed_variants=completed_variants,
+                    total_variants=total_variants,
+                    fn=lambda: self.factor_engine.run(
+                        factor_spec=factor_spec,
+                        dataset_version=dataset_version,
+                        factor_version=factor_version,
+                        seed=plan.seed,
+                    ),
+                )
+                factor_report_payload = factor_result.report.model_dump(mode="json")
+                strategy_decision = _run_with_heartbeat(
+                    stage="variant.strategy",
+                    status_text="selecting strategy candidate",
+                    variant_id=variant.variant_id,
+                    variant_index=variant_index,
+                    completed_variants=completed_variants,
+                    total_variants=total_variants,
+                    fn=lambda: self.strategy_agent.decide(
+                        question=plan.question,
+                        market=plan_market,
+                        research_plan=plan.model_dump(mode="json"),
+                        factor_health_report=factor_report_payload,
+                        constraints=plan.constraints,
+                        market_rules=self._market_rules_payload(plan_market),
+                        risk_budget=variant.risk_budget,
+                        variant=variant.model_dump(mode="json"),
+                    ),
+                )
+                strategy_spec = self._build_strategy_spec(
+                    plan,
+                    variant,
+                    factor_result.factor_version,
+                    strategy_decision=strategy_decision,
+                )
+                backtest_request = self._build_backtest_request(
+                    plan=plan,
+                    variant=variant,
+                    strategy_spec=strategy_spec,
+                    dataset_version=dataset_version,
+                    evidence=evidence,
+                    factor_id=factor_result.factor_id,
+                    factor_version=factor_result.factor_version,
+                    factor_artifact_path=factor_result.artifact_path,
+                    factor_failure_conditions=factor_spec.failure_conditions,
+                    strategy_decision=strategy_decision,
+                )
+                _notify(
+                    "task.progress",
+                    {
+                        "stage": "variant.backtest",
+                        "status": "running",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                    },
+                )
+                report = _run_with_heartbeat(
+                    stage="variant.backtest",
+                    status_text="running backtest engine",
+                    variant_id=variant.variant_id,
+                    variant_index=variant_index,
+                    completed_variants=completed_variants,
+                    total_variants=total_variants,
+                    fn=lambda: self.runner.run(backtest_request),
+                )
+                score = self._score_objective(report.metrics, plan.objectives)
+                result = ExperimentResult(
+                    variant_id=variant.variant_id,
+                    strategy_family=variant.strategy_family,
+                    factor_version=factor_result.factor_version,
+                    strategy_version=strategy_spec.strategy_version,
+                    run_id=str(report.run_id),
+                    dataset_version=dataset_version,
+                    objective_score=score,
+                    metrics=report.metrics,
+                    factor_report=factor_result.report.model_dump(mode="json"),
+                    factor_artifact_path=factor_result.artifact_path,
+                    factor_cached=factor_result.cached,
+                    strategy_spec=strategy_spec.model_dump(mode="json"),
+                    strategy_decision=strategy_decision.model_dump(mode="json"),
+                    backtest_request=backtest_request.model_dump(mode="json"),
+                    why_selected=strategy_decision.selected.rationale or variant.notes or strategy_spec.rationale,
+                )
+                experiments.append(result)
+                _notify(
+                    "artifact.created",
+                    {
+                        "stage": "variant.factor",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "completed_variants": completed_variants,
+                        "total_variants": total_variants,
+                        "artifact_type": "factor_report",
+                        "artifact_id": factor_result.factor_version,
+                        "open_path": "",
+                        "artifact_ref": {
+                            "factor_id": factor_result.factor_id,
+                            "factor_version": factor_result.factor_version,
+                            "artifact_path": factor_result.artifact_path,
+                        },
+                    },
+                )
+                _notify(
+                    "artifact.created",
+                    {
+                        "stage": "variant.backtest",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "completed_variants": completed_variants + 1,
+                        "total_variants": total_variants,
+                        "artifact_type": "backtest_report",
+                        "artifact_id": str(report.run_id),
+                        "run_id": str(report.run_id),
+                        "open_path": f"/reports/{report.run_id}",
+                    },
+                )
+                self._audit(
+                    trace_id,
+                    "pipeline.experiment.done",
+                    {
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "factor_spec": factor_spec.model_dump(mode="json"),
+                        "factor_report": factor_result.report.model_dump(mode="json"),
+                        "factor_artifact_path": factor_result.artifact_path,
+                        "factor_health_report_artifact_path": factor_result.report.health_report_artifact_path,
+                        "factor_cached": factor_result.cached,
+                        "strategy_spec": strategy_spec.model_dump(mode="json"),
+                        "strategy_decision": strategy_decision.model_dump(mode="json"),
+                        "backtest_request": backtest_request.model_dump(mode="json"),
+                        "evidence_pack_id": str(evidence.evidence_pack_id),
+                        "metrics": report.metrics,
+                    },
+                    report.run_id,
+                )
+                _notify(
+                    "audit.tail",
+                    {
+                        "stage": "variant.backtest",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "event_type": "pipeline.experiment.done",
+                        "summary": f"variant {variant.variant_id} run_id={report.run_id}",
+                        "run_id": str(report.run_id),
+                        "completed_variants": completed_variants + 1,
+                        "total_variants": total_variants,
+                    },
+                )
+                self._audit(
+                    trace_id,
+                    "strategy.decision.selected",
+                    {
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "selected": strategy_decision.selected.model_dump(mode="json"),
+                        "candidates": [row.model_dump(mode="json") for row in strategy_decision.candidates],
+                        "llm_mode": strategy_decision.llm_mode,
+                    },
+                    report.run_id,
+                )
+                _notify(
+                    "audit.tail",
+                    {
+                        "stage": "variant.strategy",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "event_type": "strategy.decision.selected",
+                        "summary": f"strategy={strategy_spec.strategy_version}",
+                        "run_id": str(report.run_id),
+                        "completed_variants": completed_variants + 1,
+                        "total_variants": total_variants,
+                    },
+                )
+                completed_variants += 1
+                _notify(
+                    "task.variant_done",
+                    {
+                        "stage": "variant.done",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                        "run_id": str(report.run_id),
+                        "report_id": str(report.run_id),
+                        "dataset_version": dataset_version,
+                        "strategy_version": strategy_spec.strategy_version,
+                        "metrics": report.metrics,
+                    },
+                )
+                _notify(
+                    "task.progress",
+                    {
+                        "stage": "variants.running",
+                        "status": "running",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                    },
+                )
+            except Exception as ex:
+                _notify(
+                    "task.error",
+                    {
+                        "stage": "variant.failed",
+                        "market": plan_market,
+                        "plan_id": plan.plan_id,
+                        "variant_id": variant.variant_id,
+                        "variant_index": variant_index,
+                        "total_variants": total_variants,
+                        "completed_variants": completed_variants,
+                        "error_message": str(ex),
+                        "stacktrace": traceback.format_exc(),
+                    },
+                )
+                raise
 
         experiments = sorted(experiments, key=lambda item: item.objective_score, reverse=True)
         if not experiments:
@@ -645,6 +1149,17 @@ class ResearchPipelineEngine:
                 artifacts=[exp.run_id for exp in experiments],
             )
         )
+        _notify(
+            "task.progress",
+            {
+                "stage": "backtest.compare",
+                "status": "done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
         paper = self._stage_paper_trade(
             plan,
             trace_id,
@@ -652,6 +1167,18 @@ class ResearchPipelineEngine:
             enabled=run_paper_trade,
             evidence_pack_id=str(evidence.evidence_pack_id),
         )
+        if run_paper_trade:
+            _notify(
+                "task.progress",
+                {
+                    "stage": "paper.trade",
+                    "status": "done",
+                    "market": plan_market,
+                    "plan_id": plan.plan_id,
+                    "completed_variants": completed_variants,
+                    "total_variants": total_variants,
+                },
+            )
         risk_explanation = (
             "Risk gate active. Live trading remains disabled by default. "
             f"Kill switch is {'on' if self.trading_service.status().kill_switch_enabled else 'off'}."
@@ -664,11 +1191,52 @@ class ResearchPipelineEngine:
             response_language=response_language,
         )
         comparison = self._comparison_table(experiments)
-        self._emit("task.done", trace_id, {"stage": "pipeline.done", "run_id": best.run_id, "plan_id": plan.plan_id})
+        _notify(
+            "task.done",
+            {
+                "stage": "pipeline.done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "run_id": best.run_id,
+                "report_id": best.run_id,
+                "dataset_version": best.dataset_version,
+                "strategy_version": best.strategy_version,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
+        _notify(
+            "artifact.created",
+            {
+                "stage": "pipeline.done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "artifact_type": "final_report",
+                "artifact_id": best.run_id,
+                "run_id": best.run_id,
+                "open_path": f"/reports/{best.run_id}",
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
+        _notify(
+            "audit.tail",
+            {
+                "stage": "pipeline.done",
+                "market": plan_market,
+                "plan_id": plan.plan_id,
+                "event_type": "pipeline.done",
+                "summary": f"best_run={best.run_id}, variants={len(experiments)}",
+                "run_id": best.run_id,
+                "completed_variants": completed_variants,
+                "total_variants": total_variants,
+            },
+        )
 
         return PipelineResponse(
             trace_id=trace_id,
             question=plan.question,
+            market=plan_market,
             plan_id=plan.plan_id,
             evidence_pack_id=str(evidence.evidence_pack_id),
             evidence_sources=[self._evidence_source_payload(source) for source in evidence.sources],
@@ -688,6 +1256,7 @@ class ResearchPipelineEngine:
             interpretation=interpretation,
             paper_trade_result=paper,
             agent_outputs=list(plan.tool_context.get("agent_outputs", [])),
+            reasoning_steps=list(plan.tool_context.get("reasoning_steps", [])),
             preflight_warnings=preflight_warnings,
             preflight_actions=preflight_actions,
             llm_mode=interpret_mode if interpret_mode != "stub" else llm_mode,
@@ -730,7 +1299,7 @@ class ResearchPipelineEngine:
         self._emit("task.progress", trace_id, {"stage": "evidence.pack", "status": "done"})
 
     def _stage_dataset(self, plan: ResearchPlan, trace_id: str, steps: list[PipelineStep]) -> str:
-        market = plan.markets[0] if plan.markets else "US"
+        market = self._plan_market(plan)
         symbol_map = {"US": "AAPL", "CN": "600519.SS", "JP": "7203.T", "CRYPTO": "BTCUSDT"}
         config = MockDatasetConfig(
             dataset_id=f"plan_{market.lower()}",
@@ -778,7 +1347,7 @@ class ResearchPipelineEngine:
             "lookback_days": variant.lookback_days,
             "signal_threshold": variant.signal_threshold,
             "strategy_family": variant.strategy_family,
-            "market": plan.markets[0],
+            "market": self._plan_market(plan),
             "decay_lags": 6,
         }
         raw_universe = plan.constraints.get("universe")
@@ -818,7 +1387,7 @@ class ResearchPipelineEngine:
                 FactorTransform(name="volatility", params={"window": max(5, min(variant.lookback_days, 30))}),
                 FactorTransform(name="volume_surprise", params={"window": max(5, min(variant.lookback_days, 30))}),
                 FactorTransform(name="intraday_return", params={}),
-                FactorTransform(name="carry_proxy", params={"market": plan.markets[0]}),
+                FactorTransform(name="carry_proxy", params={"market": self._plan_market(plan)}),
             ],
             failure_conditions=[
                 "high_volatility_regime",
@@ -930,7 +1499,7 @@ class ResearchPipelineEngine:
             strategy_version=strategy_version,
             plan_id=plan.plan_id,
             experiment_id=variant.variant_id,
-            market=plan.markets[0],
+            market=self._plan_market(plan),
             strategy_family=selected_strategy_family,
             rebalance=selected_rebalance,
             lookback_days=selected_lookback,
@@ -1001,7 +1570,7 @@ class ResearchPipelineEngine:
             dataset_version=dataset_version,
             strategy_id=strategy_spec.strategy_id,
             strategy_version=strategy_spec.strategy_version,
-            market=plan.markets[0],
+            market=self._plan_market(plan),
             start=variant.start,
             end=variant.end,
             execution_model=str(constraints.get("execution_model", "next_open")),
@@ -1035,7 +1604,7 @@ class ResearchPipelineEngine:
             return None
         result = self.trading_service.place_paper_order(
             PaperOrderRequest(
-                instrument_id=f"{plan.markets[0]}_DEMO",
+                instrument_id=f"{self._plan_market(plan)}_DEMO",
                 side="buy",
                 quantity=100,
                 order_type="market",
@@ -1211,7 +1780,7 @@ class ResearchPipelineEngine:
         return rows
 
     def _run_migration_preflight(self, plan: ResearchPlan) -> list[PreflightWarning]:
-        market = str((plan.markets or ["US"])[0]).upper()
+        market = self._plan_market(plan)
         if market not in {"US", "CN", "JP", "CRYPTO"}:
             return []
         rules = self.runner.market_rules.get(market)
@@ -1420,13 +1989,27 @@ class ResearchPipelineEngine:
 
     def _infer_market(self, text: str) -> str:
         low = text.lower()
-        if ("\u65e5\u7ecf" in text) or ("\u65e5\u672c" in text) or ("nikkei" in low):
+        if (
+            ("\u65e5\u7ecf" in text)
+            or ("\u65e5\u672c" in text)
+            or ("\u65e5\u80a1" in text)
+            or ("nikkei" in low)
+            or ("japan" in low)
+            or bool(re.search(r"(?<![a-zA-Z0-9])JP(?![a-zA-Z0-9])", text, flags=re.IGNORECASE))
+        ):
             return "JP"
-        if ("a\u80a1" in text) or ("\u6caa\u6df1" in text) or ("\u4e2d\u8bc1" in text):
+        if ("a\u80a1" in text) or ("\u6caa\u6df1" in text) or ("\u4e2d\u8bc1" in text) or ("china" in low):
             return "CN"
         if ("crypto" in low) or ("\u52a0\u5bc6" in text) or ("\u6bd4\u7279\u5e01" in text):
             return "CRYPTO"
-        return "US"
+        if (
+            ("\u7f8e\u80a1" in text)
+            or ("nasdaq" in low)
+            or ("sp500" in low)
+            or bool(re.search(r"(?<![a-zA-Z0-9])US(?![a-zA-Z0-9])", text, flags=re.IGNORECASE))
+        ):
+            return "US"
+        return self._normalize_market(None, default=str(settings.default_market or "US"))
 
     def _seed_from_question(self, question: str) -> int:
         return int(hashlib.sha1(question.encode("utf-8")).hexdigest()[:8], 16) % 100000

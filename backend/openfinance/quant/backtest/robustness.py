@@ -66,6 +66,9 @@ class RobustnessReport(BaseModel):
     strategy_id: str
     strategy_version: str
     market: str
+    parent_task_id: str | None = None
+    child_task_ids: list[str] = Field(default_factory=list)
+    summary_report_ref: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     variants: list[RobustnessVariant] = Field(default_factory=list)
     summary: RobustnessSummary

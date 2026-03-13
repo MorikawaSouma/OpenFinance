@@ -10,7 +10,7 @@ def _wait_task(client: TestClient, task_id: str, timeout_s: float = 5.0) -> dict
     t0 = time.time()
     while time.time() - t0 <= timeout_s:
         payload = client.get(f"/workbench/tasks/{task_id}").json()
-        if payload["status"] in {"done", "failed"}:
+        if payload["status"] in {"done", "failed", "error", "canceled"}:
             return payload
         time.sleep(0.1)
     raise TimeoutError(f"task timeout: {task_id}")
@@ -219,3 +219,34 @@ def test_workbench_formula_factor_requires_metadata_fields() -> None:
     )
     assert run.status_code == 400
     assert "failure_conditions" in run.json().get("detail", "")
+
+
+def test_multi_market_compare_creates_parent_child_tasks() -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/workbench/reports/multi-market/compare",
+        json={
+            "markets": ["US", "JP"],
+            "strategy_id": "obs_test_strategy",
+            "strategy_version": "obs-test-v1",
+            "start": "2024-01-01",
+            "end": "2024-03-31",
+            "seed": 7,
+        },
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    parent_task_id = str(payload.get("parent_task_id") or "")
+    child_task_ids = payload.get("child_task_ids") or []
+    assert parent_task_id
+    assert len(child_task_ids) >= 2
+
+    parent = _wait_task(client, parent_task_id, timeout_s=8.0)
+    assert parent["status"] == "done"
+    assert parent.get("result_ref", {}).get("open_path")
+
+    tasks = client.get("/workbench/tasks").json()
+    children = [row for row in tasks if str(row.get("parent_task_id") or "") == parent_task_id]
+    assert len(children) >= 2
+    assert all(row.get("status") == "done" for row in children)
+    assert all(str(row.get("result_ref", {}).get("run_id") or "").strip() for row in children)

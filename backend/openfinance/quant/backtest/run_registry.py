@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class RunRegistryEntry(BaseModel):
     run_id: UUID
     dataset_version: str
+    market: str = "US"
     strategy_id: str
     strategy_version: str
     audit_trace_id: UUID

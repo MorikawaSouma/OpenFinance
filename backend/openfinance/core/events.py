@@ -12,6 +12,7 @@ class InMemoryEventBus:
 
     def publish(self, event_type: str, payload: dict, trace_id: str | None = None, session_id: str = "global") -> dict:
         event = {
+            "event_id": str(uuid4()),
             "type": event_type,
             "trace_id": trace_id or str(uuid4()),
             "session_id": session_id,

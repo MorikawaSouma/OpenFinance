@@ -10,6 +10,7 @@ import type {
   FactorDetail,
   FactorMultiMarketCompareRequest,
   FactorMultiMarketCompareResponse,
+  FactorRunRequest,
   FactorRunResponse,
   FactorSummary,
   ResearchPlan,
@@ -106,7 +107,12 @@ async function post<T>(path: string, body: Record<string, unknown>): Promise<T> 
 }
 
 export const api = {
-  getTasks: () => get<TaskRecord[]>("/workbench/tasks"),
+  getTasks: (sessionId?: string) =>
+    get<TaskRecord[]>(
+      `/workbench/tasks${
+        sessionId && String(sessionId).trim().length > 0 ? `?session_id=${encodeURIComponent(String(sessionId).trim())}` : ""
+      }`
+    ),
   getTask: (taskId: string) => get<TaskRecord>(`/workbench/tasks/${taskId}`),
   getDatasets: () => get<DatasetEntry[]>("/workbench/datasets"),
   getDataset: (datasetVersion: string) => get<DatasetEntry>(`/workbench/datasets/${datasetVersion}`),
@@ -117,9 +123,12 @@ export const api = {
   getStrategy: (version: string) => get<StrategyDetail>(`/workbench/strategies/${version}`),
   getFactors: () => get<FactorSummary[]>("/workbench/factors"),
   getFactor: (version: string) => get<FactorDetail>(`/workbench/factors/${version}`),
-  runFactor: (payload: Record<string, unknown>) => post<FactorRunResponse>("/workbench/factors/run", payload),
+  runFactor: (payload: FactorRunRequest) => post<FactorRunResponse>("/workbench/factors/run", payload),
+  submitFactorRun: (payload: FactorRunRequest) => post<TaskRecord>("/workbench/factors/run/submit", payload),
   compareFactorMultiMarket: (payload: FactorMultiMarketCompareRequest) =>
     post<FactorMultiMarketCompareResponse>("/workbench/factor/multi_market_compare", payload),
+  submitFactorMultiMarketCompare: (payload: FactorMultiMarketCompareRequest) =>
+    post<TaskRecord>("/workbench/factor/multi_market_compare/submit", payload),
   getRiskStatus: () => get<RiskStatus>("/trading/status"),
   getRiskEvents: (limit = 50) => get<RiskEventRow[]>(`/trading/risk/events?limit=${limit}`),
   updateRiskHeartbeat: (payload: {
@@ -137,11 +146,16 @@ export const api = {
   getPlan: (planId: string) => get<ResearchPlan>(`/plan/${planId}`),
   runPlan: (payload: Record<string, unknown>) => post<PipelineResponse>("/run", payload),
   runPipeline: (payload: Record<string, unknown>) => post<PipelineResponse>("/pipeline/run", payload),
+  runPlanSubmit: (payload: Record<string, unknown>) => post<TaskRecord>("/run/submit", payload),
+  runPipelineSubmit: (payload: Record<string, unknown>) => post<TaskRecord>("/pipeline/run/submit", payload),
   restoreTrace: (traceId: string, sessionId?: string) =>
     get<RestoreBundle>(`/trace/${traceId}/restore${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
   compareMultiMarket: (payload: MultiMarketCompareRequest) =>
     post<MultiMarketCompareResponse>("/workbench/reports/multi-market/compare", payload),
+  submitMultiMarketCompare: (payload: MultiMarketCompareRequest) =>
+    post<TaskRecord>("/workbench/reports/multi-market/compare/submit", payload),
   runRobustness: (payload: RobustnessRunRequest) => post<RobustnessReport>("/workbench/reports/robustness/run", payload),
+  submitRobustness: (payload: RobustnessRunRequest) => post<TaskRecord>("/workbench/reports/robustness/run/submit", payload),
   sendChat: (payload: Record<string, unknown>) => post<ChatResponse>("/chat/message", payload),
   getChatSessions: () => get<ChatSessionSummary[]>("/chat/sessions"),
   getChatSessionTurns: (sessionId: string) => get<ChatTurn[]>(`/chat/sessions/${sessionId}`),

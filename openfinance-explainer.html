@@ -1,0 +1,1467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenFinance 说明书：一个可审计可复现的量化研究与风控工作台</title>
+  <style>
+    :root {
+      --bg: #e9f0f5;
+      --paper: rgba(246, 250, 253, 0.88);
+      --paper-strong: rgba(251, 253, 255, 0.96);
+      --ink: #18212a;
+      --muted: #5f6f7a;
+      --line: rgba(24, 33, 42, 0.12);
+      --accent: #2c7180;
+      --accent-strong: #163f4d;
+      --accent-soft: rgba(44, 113, 128, 0.1);
+      --accent-warm: #6d8fa6;
+      --warm-soft: rgba(109, 143, 166, 0.12);
+      --warn: rgba(109, 143, 166, 0.12);
+      --gold: #8fb9c8;
+      --deep: #102934;
+      --shadow: 0 24px 60px rgba(26, 43, 56, 0.12);
+      --shadow-soft: 0 16px 34px rgba(26, 43, 56, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      position: relative;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 6%, rgba(44, 113, 128, 0.16), transparent 28%),
+        radial-gradient(circle at 92% 12%, rgba(109, 143, 166, 0.14), transparent 18%),
+        radial-gradient(circle at 50% 100%, rgba(143, 185, 200, 0.12), transparent 24%),
+        linear-gradient(180deg, #f2f7fb 0%, #e8eff5 58%, #dde6ee 100%);
+      font-family: "Source Han Serif SC", "Noto Serif SC", "Songti SC", serif;
+      line-height: 1.8;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      pointer-events: none;
+      inset: 0;
+    }
+    body::before {
+      background:
+        repeating-linear-gradient(90deg, rgba(16, 41, 52, 0.03) 0 1px, transparent 1px 96px),
+        repeating-linear-gradient(180deg, rgba(16, 41, 52, 0.025) 0 1px, transparent 1px 96px);
+      opacity: 0.42;
+      mix-blend-mode: multiply;
+    }
+    body::after {
+      inset: 20px;
+      border: 1px solid rgba(16, 41, 52, 0.05);
+      border-radius: 28px;
+    }
+
+    ::selection {
+      background: rgba(44, 113, 128, 0.18);
+      color: var(--deep);
+    }
+
+    a {
+      color: var(--accent-strong);
+      text-decoration: none;
+      transition: color 0.2s ease, opacity 0.2s ease;
+    }
+    a:hover { color: var(--accent); text-decoration: underline; }
+    code {
+      padding: 0.08em 0.38em;
+      border-radius: 8px;
+      border: 1px solid rgba(16, 41, 52, 0.08);
+      background: linear-gradient(180deg, rgba(245, 250, 253, 0.98), rgba(234, 242, 247, 0.86));
+      font-family: Consolas, monospace;
+      font-size: 0.92em;
+      color: var(--accent-strong);
+    }
+
+    .shell {
+      position: relative;
+      width: min(1480px, calc(100vw - 28px));
+      margin: 24px auto 64px;
+    }
+    .hero, .panel, .footer, .nav {
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow-soft);
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 48px;
+      border-radius: 34px;
+      background:
+        linear-gradient(135deg, rgba(9, 28, 38, 0.98), rgba(22, 63, 77, 0.94) 52%, rgba(69, 117, 139, 0.72) 100%);
+      color: #f7f4ef;
+    }
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto;
+      pointer-events: none;
+    }
+    .hero::before {
+      right: -80px;
+      top: -90px;
+      width: 360px;
+      height: 360px;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.03) 36%, transparent 70%);
+      filter: blur(2px);
+    }
+    .hero::after {
+      left: 28px;
+      right: 28px;
+      top: 22px;
+      height: 1px;
+      background: linear-gradient(90deg, rgba(255,255,255,0), rgba(143, 185, 200, 0.95), rgba(255,255,255,0));
+      opacity: 0.8;
+    }
+    .hero > * { position: relative; z-index: 1; }
+
+    .hero .eyebrow, h1, h2, h3, .nav-title {
+      font-family: "Avenir Next Condensed", "PingFang SC", sans-serif;
+    }
+
+    .hero .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 9px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(232, 243, 249, 0.18);
+      background: linear-gradient(180deg, rgba(240, 248, 253, 0.14), rgba(222, 238, 246, 0.08));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        0 10px 24px rgba(7, 22, 31, 0.16);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: rgba(230, 241, 247, 0.78);
+    }
+    .hero .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(143, 185, 200, 0.95);
+      box-shadow: 0 0 0 5px rgba(143, 185, 200, 0.14);
+      flex: 0 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      max-width: 1240px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      line-height: 1.03;
+      letter-spacing: -0.02em;
+      text-wrap: balance;
+    }
+    .hero-title-main {
+      display: block;
+      font-size: clamp(40px, 5.4vw, 66px);
+      line-height: 1.02;
+    }
+    .hero-title-sub {
+      display: block;
+      max-width: 1280px;
+      font-size: clamp(18px, 1.9vw, 26px);
+      line-height: 1.16;
+      letter-spacing: -0.01em;
+      color: rgba(232, 243, 249, 0.88);
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .hero-grid, .layout, .split, .glossary {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-grid {
+      grid-template-columns: minmax(0, 940px);
+      margin-top: 30px;
+      gap: 14px;
+    }
+    .hero-card, .cell, .term {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .hero-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+      backdrop-filter: blur(10px);
+    }
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      top: 0;
+      height: 3px;
+      background: linear-gradient(90deg, rgba(255,255,255,0), rgba(143, 185, 200, 0.95), rgba(255,255,255,0));
+    }
+
+    .hero-card strong, .cell strong, .term strong {
+      display: block;
+      margin-bottom: 7px;
+      font-family: "Avenir Next Condensed", "PingFang SC", sans-serif;
+    }
+    .hero-card strong {
+      margin-bottom: 8px;
+      font-size: 18px;
+      color: #f3fbff;
+      letter-spacing: 0.04em;
+    }
+    .hero-card p {
+      margin: 0;
+      max-width: none;
+      font-size: 15px;
+      line-height: 1.72;
+      color: rgba(237, 246, 250, 0.86);
+    }
+    .hero-card ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+    .hero-card li {
+      position: relative;
+      padding-left: 18px;
+      font-size: 15px;
+      line-height: 1.68;
+      color: rgba(237, 246, 250, 0.86);
+    }
+    .hero-card li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.72em;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: rgba(143, 185, 200, 0.92);
+      box-shadow: 0 0 0 4px rgba(143, 185, 200, 0.12);
+    }
+
+    .layout {
+      grid-template-columns: 228px minmax(0, 1fr);
+      margin-top: 28px;
+      gap: 18px;
+      align-items: start;
+    }
+    .nav {
+      position: sticky;
+      overflow: hidden;
+      top: 18px;
+      padding: 18px 16px;
+      border-radius: 28px;
+      background: linear-gradient(180deg, rgba(247, 251, 254, 0.94), rgba(241, 247, 251, 0.8));
+      backdrop-filter: blur(12px);
+    }
+    .nav::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--accent), var(--gold), var(--accent-warm));
+      opacity: 0.85;
+    }
+
+    .nav-title {
+      margin: 0 0 10px;
+      color: var(--deep);
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .nav ol {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: nav-item;
+    }
+    .nav li {
+      counter-increment: nav-item;
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 8px;
+      align-items: start;
+      margin: 0;
+      padding: 7px 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .nav li::before {
+      content: counter(nav-item, decimal-leading-zero);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 11px;
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(237, 244, 248, 0.72));
+      color: var(--accent-strong);
+      font: 700 12px/1 "Avenir Next Condensed", "PingFang SC", sans-serif;
+      letter-spacing: 0.08em;
+    }
+    .nav li a {
+      display: block;
+      padding-top: 5px;
+      color: var(--muted);
+    }
+    .nav li a:hover {
+      color: var(--deep);
+      text-decoration: none;
+    }
+    .nav .tag {
+      margin-top: 16px;
+      padding: 14px 15px;
+      border-radius: 18px;
+      border: 1px solid rgba(16, 41, 52, 0.08);
+      background: linear-gradient(180deg, rgba(232, 242, 247, 0.88), rgba(244, 249, 252, 0.78));
+      color: var(--deep);
+      font-size: 13px;
+    }
+
+    .article { display: grid; gap: 24px; }
+    .panel {
+      position: relative;
+      overflow: hidden;
+      padding: 32px 38px;
+      border-radius: 30px;
+      background: linear-gradient(180deg, var(--paper-strong), rgba(244, 249, 252, 0.9));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .panel::before,
+    .panel::after {
+      content: "";
+      position: absolute;
+      pointer-events: none;
+    }
+    .panel::before {
+      left: 0;
+      top: 22px;
+      width: 118px;
+      height: 6px;
+      border-radius: 0 999px 999px 0;
+      background: linear-gradient(90deg, var(--accent), var(--gold));
+    }
+    .panel::after {
+      right: -80px;
+      top: -80px;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(44, 113, 128, 0.08), transparent 72%);
+    }
+    .article > .panel:nth-of-type(even)::after {
+      background: radial-gradient(circle, rgba(109, 143, 166, 0.08), transparent 72%);
+    }
+
+    .panel h2 {
+      position: relative;
+      margin: 0 0 14px;
+      font-size: clamp(21px, 1.72vw, 28px);
+      line-height: 1.12;
+      letter-spacing: -0.015em;
+      max-width: none;
+      white-space: nowrap;
+      text-wrap: nowrap;
+    }
+    .panel h2::after {
+      content: "";
+      display: block;
+      width: 78px;
+      height: 4px;
+      margin-top: 12px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--gold));
+    }
+    .panel h3 {
+      margin: 24px 0 8px;
+      font-size: 19px;
+      color: var(--deep);
+    }
+    .panel p { margin: 10px 0; font-size: 16px; }
+    .lede {
+      font-size: 18px;
+      color: var(--deep);
+      max-width: 58em;
+    }
+
+    .diagram, .note, .warning {
+      margin: 16px 0;
+      position: relative;
+      overflow: hidden;
+      padding: 18px 20px;
+      border-radius: 22px;
+    }
+    .diagram {
+      border: 1px solid rgba(44, 113, 128, 0.18);
+      background: linear-gradient(180deg, rgba(234, 244, 248, 0.9), rgba(245, 250, 253, 0.76));
+    }
+    .note {
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: linear-gradient(180deg, rgba(246, 250, 253, 0.94), rgba(236, 242, 247, 0.8));
+    }
+    .warning {
+      border: 1px solid rgba(109, 143, 166, 0.18);
+      background: linear-gradient(180deg, rgba(241, 246, 251, 0.94), rgba(229, 238, 246, 0.8));
+    }
+    .diagram::before,
+    .note::before,
+    .warning::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+    }
+    .diagram::before { background: linear-gradient(180deg, var(--accent), rgba(44, 113, 128, 0)); }
+    .note::before { background: linear-gradient(180deg, var(--gold), rgba(143, 185, 200, 0)); }
+    .warning::before { background: linear-gradient(180deg, var(--accent-warm), rgba(109, 143, 166, 0)); }
+    .diagram strong, .note strong, .warning strong {
+      display: block;
+      margin-bottom: 6px;
+      font-family: "Avenir Next Condensed", "PingFang SC", sans-serif;
+    }
+    .diagram-board {
+      margin-top: 10px;
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid rgba(16, 41, 52, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(243, 248, 251, 0.82));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+    }
+    .diagram-board + .diagram-caption { margin-top: 12px; }
+    .diagram-caption, .diagram-explain {
+      font-size: 14px;
+    }
+    .diagram-caption {
+      color: var(--deep);
+      font-weight: 600;
+      margin-bottom: 0;
+    }
+    .diagram-explain {
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .diagram-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .diagram-grid-4, .diagram-grid-3, .diagram-grid-2 {
+      display: grid;
+      gap: 12px;
+    }
+    .diagram-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .diagram-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .diagram-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .diagram-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .diagram-column {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+    .diagram-node {
+      position: relative;
+      padding: 12px 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(241, 247, 250, 0.9));
+      box-shadow: 0 12px 24px rgba(16, 41, 52, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+      min-height: 72px;
+      transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+    }
+    .diagram-node strong,
+    .diagram-chip-title,
+    .diagram-mini-title {
+      margin: 0 0 4px;
+      font-family: "Avenir Next Condensed", "PingFang SC", sans-serif;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--deep);
+    }
+    .diagram-node p,
+    .diagram-mini p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.55;
+      color: #37545a;
+    }
+    .diagram-node--accent {
+      background: linear-gradient(180deg, rgba(44, 113, 128, 0.16), rgba(44, 113, 128, 0.08));
+      border-color: rgba(44, 113, 128, 0.22);
+    }
+    .diagram-node--warm {
+      background: linear-gradient(180deg, rgba(109, 143, 166, 0.18), rgba(109, 143, 166, 0.08));
+      border-color: rgba(109, 143, 166, 0.24);
+    }
+    .diagram-node--plain {
+      min-height: 0;
+      padding: 10px 12px;
+    }
+    .diagram-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 30px;
+      color: var(--accent);
+      font: 700 24px/1 "Avenir Next Condensed", "PingFang SC", sans-serif;
+    }
+    .diagram-arrow--down {
+      min-height: 24px;
+    }
+    .diagram-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .diagram-chip {
+      padding: 6px 9px;
+      border-radius: 999px;
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(240, 246, 249, 0.74));
+      font: 600 11px/1.2 "Avenir Next Condensed", "PingFang SC", sans-serif;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #2c4b50;
+      white-space: nowrap;
+    }
+    .diagram-mini-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .diagram-mini {
+      padding: 10px 11px;
+      border-radius: 14px;
+      background: rgba(16, 41, 52, 0.05);
+      border: 1px solid rgba(16, 41, 52, 0.08);
+    }
+    .diagram-sequence {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 4px 2px 6px;
+    }
+    .diagram-sequence > * { flex: 0 0 auto; }
+    .diagram-sequence::-webkit-scrollbar { height: 8px; }
+    .diagram-sequence::-webkit-scrollbar-thumb {
+      background: rgba(44, 113, 128, 0.18);
+      border-radius: 999px;
+    }
+    .diagram-sequence .diagram-node { min-width: 168px; }
+    .diagram-sequence .diagram-column { min-width: 184px; }
+    .diagram-relay-track {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.95fr) 40px minmax(320px, 1.4fr) 40px minmax(180px, 0.95fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .diagram-agent-rail {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .diagram-agent-pill {
+      padding: 8px 6px;
+      border-radius: 14px;
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: rgba(16, 41, 52, 0.05);
+      text-align: center;
+      font: 700 11px/1.2 "Avenir Next Condensed", "PingFang SC", sans-serif;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #2b4a4f;
+    }
+    .diagram-callout {
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(16, 41, 52, 0.1);
+      background: linear-gradient(180deg, rgba(238, 245, 249, 0.86), rgba(246, 250, 252, 0.74));
+    }
+    .diagram-callout p { margin: 0; font-size: 12px; color: #37545a; }
+
+    .split { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 14px 0; }
+    .cell {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(31, 27, 24, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(241, 247, 250, 0.76));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    }
+
+    .chain { display: grid; gap: 10px; margin: 16px 0; }
+    .chain-step {
+      position: relative;
+      padding: 14px 16px 14px 50px;
+      border-radius: 18px;
+      border: 1px solid rgba(31, 27, 24, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(241, 246, 250, 0.78));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+    }
+    .chain-step::before {
+      content: attr(data-step);
+      position: absolute;
+      left: 16px;
+      top: 14px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: linear-gradient(180deg, var(--deep), var(--accent));
+      color: #fff;
+      font: 700 12px/24px "Avenir Next Condensed", "PingFang SC", sans-serif;
+      text-align: center;
+      box-shadow: 0 8px 18px rgba(17, 42, 49, 0.24);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 6px;
+      font-size: 14px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(240, 246, 249, 0.74));
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(17, 42, 49, 0.08);
+    }
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid rgba(31, 27, 24, 0.08);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: linear-gradient(180deg, rgba(17, 42, 49, 0.09), rgba(17, 42, 49, 0.04));
+      font-family: "Avenir Next Condensed", "PingFang SC", sans-serif;
+      color: var(--deep);
+    }
+    tbody tr:nth-child(even) td { background: rgba(17, 42, 49, 0.02); }
+    tr:last-child td { border-bottom: 0; }
+
+    .glossary { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; }
+    .term {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(31, 27, 24, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(241, 247, 250, 0.76));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    }
+    .term::before,
+    .cell::before {
+      content: "";
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      top: 0;
+      height: 3px;
+      background: linear-gradient(90deg, rgba(44, 113, 128, 0), rgba(143, 185, 200, 0.92), rgba(44, 113, 128, 0));
+    }
+
+    .footer {
+      position: relative;
+      overflow: hidden;
+      padding: 28px 30px;
+      border-radius: 30px;
+      background: linear-gradient(135deg, rgba(9, 28, 38, 0.98), rgba(18, 61, 77, 0.94) 58%, rgba(84, 127, 149, 0.72) 100%);
+      color: rgba(247, 244, 239, 0.88);
+    }
+    .footer::before {
+      content: "";
+      position: absolute;
+      left: 24px;
+      right: 24px;
+      top: 0;
+      height: 3px;
+      background: linear-gradient(90deg, rgba(255,255,255,0), rgba(143, 185, 200, 0.95), rgba(255,255,255,0));
+    }
+    .footer p { margin: 0; font-size: 15px; }
+
+    @media (hover: hover) {
+      .hero-card:hover,
+      .cell:hover,
+      .term:hover,
+      .diagram-node:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 18px 30px rgba(17, 42, 49, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+      }
+      .nav li a:hover { opacity: 1; }
+    }
+
+    @keyframes riseFade {
+      from {
+        opacity: 0;
+        transform: translateY(16px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .hero,
+      .nav,
+      .article > .panel,
+      .footer {
+        animation: riseFade 0.72s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+      }
+      .article > .panel:nth-of-type(1) { animation-delay: 0.04s; }
+      .article > .panel:nth-of-type(2) { animation-delay: 0.08s; }
+      .article > .panel:nth-of-type(3) { animation-delay: 0.12s; }
+      .article > .panel:nth-of-type(4) { animation-delay: 0.16s; }
+      .article > .panel:nth-of-type(5) { animation-delay: 0.2s; }
+      .article > .panel:nth-of-type(6) { animation-delay: 0.24s; }
+      .article > .panel:nth-of-type(7) { animation-delay: 0.28s; }
+      .article > .panel:nth-of-type(8) { animation-delay: 0.32s; }
+      .article > .panel:nth-of-type(9) { animation-delay: 0.36s; }
+      .article > .panel:nth-of-type(10) { animation-delay: 0.4s; }
+    }
+
+    @media (max-width: 1024px) {
+      .hero-grid, .layout, .split, .glossary { grid-template-columns: 1fr; }
+      .nav { position: relative; top: 0; }
+      .diagram-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      body::after { inset: 10px; border-radius: 18px; }
+      .shell { width: min(1220px, calc(100vw - 16px)); margin: 10px auto 32px; }
+      .hero, .panel, .nav, .footer { padding: 20px 18px; }
+      .hero .eyebrow {
+        margin-bottom: 12px;
+        padding: 8px 12px;
+        gap: 8px;
+      }
+      .hero-title-main { font-size: 34px; }
+      .hero-title-sub {
+        font-size: 16px;
+        white-space: normal;
+      }
+      .hero-card p,
+      .hero-card li { font-size: 15px; }
+      .panel h2 {
+        font-size: 24px;
+        white-space: normal;
+        text-wrap: pretty;
+      }
+      .diagram-grid-4, .diagram-grid-3, .diagram-grid-2, .diagram-mini-grid { grid-template-columns: 1fr; }
+      .diagram-arrow {
+        width: 100%;
+        min-height: 24px;
+      }
+      .diagram-relay-track {
+        grid-template-columns: 1fr;
+      }
+      .diagram-agent-rail {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .diagram-sequence {
+        flex-direction: column;
+        overflow-x: visible;
+      }
+      .diagram-sequence > * { width: 100%; }
+      .diagram-sequence .diagram-node,
+      .diagram-sequence .diagram-column { min-width: 0; width: 100%; }
+      .diagram-sequence .diagram-arrow {
+        transform: rotate(90deg);
+        width: 34px;
+        align-self: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="eyebrow">OpenFinance Architecture Explainer</div>
+      <h1><span class="hero-title-main">OpenFinance 说明书</span><span class="hero-title-sub">———一个可审计可复现的量化研究与风控工作台</span></h1>
+      <div class="hero-grid">
+        <section class="hero-card">
+          <strong>摘要</strong>
+          <p>OpenFinance 把重点放在研究过程的留存上。计划、证据包、数据集版本、因子版本、策略决策、回测结果、审批记录和风险事件都会被保存下来。聊天界面只是入口，关键在于这些对象彼此有引用，事后能顺着链路查回去。</p>
+        </section>
+        <section class="hero-card">
+          <strong>先看结论</strong>
+          <ul>
+            <li>一次请求会落成一条带 <code>trace_id</code> 的执行链，后续步骤都能挂回去。</li>
+            <li>系统展示的是可审计的 reasoning 摘要，不会把模型的私有原始思维直接摊给用户。</li>
+            <li>默认环境使用本地语料、Mock 证据和 Mock 数据，所以它更接近研究与风控工作台，还不是直接连真实市场的生产交易系统。</li>
+          </ul>
+        </section>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="nav">
+        <p class="nav-title">章节导航</p>
+        <ol>
+          <li><a href="#s1">它不是陪你聊天的 AI</a></li>
+          <li><a href="#s2">一句话发出去之后发生了什么</a></li>
+          <li><a href="#s3">为什么它不会算完就忘</a></li>
+          <li><a href="#s4">多个 agent 如何接力协同</a></li>
+          <li><a href="#s5">可解释性解释什么，不解释什么</a></li>
+          <li><a href="#s6">因子和策略怎样被约束生成</a></li>
+          <li><a href="#s7">为什么必须有锁定、预检查、审批和熔断</a></li>
+          <li><a href="#s8">一个完整例子</a></li>
+          <li><a href="#s9">这套架构解决了什么，又卡在哪里</a></li>
+          <li><a href="#s10">关键词表</a></li>
+        </ol>
+        <div class="tag">本文把四层分开讲：运行时事件、持久化状态、用户可见界面、后台编排逻辑。把这四层分清，OpenFinance 的运行方式就比较容易看明白。</div>
+      </aside>
+
+      <main class="article">
+        <section class="panel" id="s1">
+          <h2>1. 它不是陪你聊天的 AI，而是一套能落地、能追踪、能复盘的研究系统</h2>
+          <p class="lede">OpenFinance 的聊天页确实长得像聊天产品，但后端并不把每句话都当成普通问答。<code>/chat/message</code> 会先做意图分流：是一般信息查询、研究流水线、基于上一次结果的修改、跨市场比较，还是风控控制动作。</p>
+          <p>被判定为研究型请求后，系统会创建任务、发事件、生成研究计划、准备证据、构造数据集、跑多组实验，再把最优实验和沿途工件挂回同一条链路上。前端聊天页看到的是回答卡片，任务页看到的是父子任务树，开发者模式看到的是推理步骤流，<code>.openfinance/registry</code> 里则留下可供事后检索的状态。</p>
+          <div class="diagram">
+            <strong>图 1　一次请求展开后的四层产物</strong>
+            <div class="diagram-board">
+              <div class="diagram-row">
+                <div class="diagram-node diagram-node--accent" style="max-width: 280px;">
+                  <strong>User Message</strong>
+                  <p>Natural language request enters a routed research system.</p>
+                </div>
+              </div>
+              <div class="diagram-row" style="margin: 8px 0 10px;">
+                <div class="diagram-arrow diagram-arrow--down">↓</div>
+              </div>
+              <div class="diagram-grid-4">
+                <div class="diagram-node">
+                  <strong>UI Layer</strong>
+                  <p>Chat reply, task tree, report pages, risk snapshot.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">Response Cards</span>
+                    <span class="diagram-chip">Task View</span>
+                    <span class="diagram-chip">Reports</span>
+                  </div>
+                </div>
+                <div class="diagram-node">
+                  <strong>Event Layer</strong>
+                  <p>Short-lived observable stream for progress and reasoning updates.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">SSE Stream</span>
+                    <span class="diagram-chip">Task Progress</span>
+                    <span class="diagram-chip">Reasoning Steps</span>
+                  </div>
+                </div>
+                <div class="diagram-node">
+                  <strong>State Layer</strong>
+                  <p>Persistent registries, audit logs, SQLite stores, task records.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">Registries</span>
+                    <span class="diagram-chip">Audit Logs</span>
+                    <span class="diagram-chip">SQLite State</span>
+                  </div>
+                </div>
+                <div class="diagram-node diagram-node--warm">
+                  <strong>Reusable Objects</strong>
+                  <p>Artifacts that can be replayed, compared, restored, or reused later.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">Plan</span>
+                    <span class="diagram-chip">Evidence Pack</span>
+                    <span class="diagram-chip">Dataset Version</span>
+                    <span class="diagram-chip">Run Report</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="diagram-caption">图 1 说明，一条用户消息进入系统后，会同时落到界面层、事件层、持久化状态层和可复用研究对象层。</p>
+            <p class="diagram-explain">聊天回答只是最外层投影。后面那三层并行产物，才撑起了可追踪和可复盘能力。</p>
+          </div>
+          <div class="split">
+            <div class="cell">
+              <strong>用户看到的</strong>
+              <p>聊天卡片、运行中任务条、风险快照、审批快照、任务页、证据页、因子页、报告页。</p>
+            </div>
+            <div class="cell">
+              <strong>系统真正关心的</strong>
+              <p><code>trace_id</code>、<code>task_id</code>、<code>plan_id</code>、<code>evidence_pack_id</code>、<code>dataset_version</code>、<code>factor_version</code>、<code>run_id</code> 与对应的审计事件。</p>
+            </div>
+          </div>
+          <p>更准确的理解方式，是把 OpenFinance 看成一个把自然语言请求翻译成研究工作流的外壳。模型只是其中一环，任务编排、证据持久化、版本编号和风险门禁同样在起作用。</p>
+        </section>
+
+        <section class="panel" id="s2">
+          <h2>2. 一句话发出去之后，系统内部到底发生了什么</h2>
+          <p>从运行路径看，一条消息至少要经过五次转换：先被识别成什么类型，再被绑定到哪个市场和上下文，再决定是同步回答还是异步任务，再一路产生活动事件，最后把结果挂回会话记忆与工件注册表。</p>
+          <div class="chain">
+            <div class="chain-step" data-step="1">
+              <strong>先判定上下文，而不是先生成答案</strong>
+              <p>聊天路由会先识别语言、市场和意图。市场解析有明确优先级：用户显式指定的市场优先，其次是消息里提到的市场，再其次是会话记忆里的 <code>last_market</code>，最后才回落到默认市场。这样做是为了让“再跑一次”“按当前市场继续”之类的请求有确定语义。</p>
+            </div>
+            <div class="chain-step" data-step="2">
+              <strong>一般信息查询走同步路径</strong>
+              <p>如果被判定为一般市场信息查询，系统会取证据、生成带引用的概括，并附上最小化 reasoning 步骤，例如“意图识别”“证据检索”“答案综合”。这条路径不会进入完整的量化实验流水线。</p>
+            </div>
+            <div class="chain-step" data-step="3">
+              <strong>研究型请求被改写成父任务</strong>
+              <p>如果请求是“给我一个低回撤策略并回测”这类研究任务，系统会创建父任务，立即返回会话响应，并通过 SSE 持续推送 <code>task.created</code>、<code>task.progress</code>、<code>task.variant_started</code>、<code>task.variant_done</code>、<code>task.done</code> 等事件。这样聊天页可以先显示“正在运行”，不必等所有实验结束。这里的 <code>variant</code>，可以理解成同一研究目标下的一组具体实验配置，例如不同窗口、不同因子组合或不同策略约束。</p>
+            </div>
+            <div class="chain-step" data-step="4">
+              <strong>后台开始真正的研究循环</strong>
+              <p>研究引擎先生成计划，再构建证据包，再准备数据集，然后对实验矩阵里的多个 variant 逐个做因子构建、策略决策、回测运行和结果比较。每个阶段都发事件，也都会留下工件。</p>
+            </div>
+            <div class="chain-step" data-step="5">
+              <strong>结果不是结束，而是新的上下文起点</strong>
+              <p>任务完成后，会话会记住 <code>last_run_id</code>、<code>last_plan_id</code>、<code>last_report_id</code>、<code>last_dataset_version</code> 和 <code>last_market</code>。这时下一句“把成本翻倍再跑一次”通常会在现有产物上继续变异，不用从头来过。</p>
+            </div>
+          </div>
+          <div class="note">
+            <strong>运行时事件和持久化状态不是一回事</strong>
+            <p>SSE 事件来自内存事件总线，最近历史只保留一个短窗口，用来支撑实时界面；可追溯性主要落在任务注册表、审计日志、证据库、因子库、运行注册表和审批库上。实时流负责把过程送到眼前，持久化工件负责让你事后还能把过程拼回来。</p>
+          </div>
+          <div class="split">
+            <div class="cell">
+              <strong>如果你盯着界面看</strong>
+              <p>你会看到聊天回答、运行条、任务树、证据卡片、风险快照和开发者 trace。这些都是用户可见投影。</p>
+            </div>
+            <div class="cell">
+              <strong>如果你盯着系统看</strong>
+              <p>你会看到另一组对象在移动：事件总线里的消息、注册表里的版本、审计日志里的动作、审批库里的状态迁移，以及回测报告中的血缘引用。</p>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>在 OpenFinance 里是什么</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>运行时事件</td>
+                <td><code>chat.delta</code>、<code>task.progress</code>、<code>reasoning.step.created</code>、<code>artifact.created</code></td>
+                <td>把过程实时送到前端与开发者视图</td>
+              </tr>
+              <tr>
+                <td>后台编排</td>
+                <td>聊天路由、研究流水线、agent orchestrator、因子引擎、回测器、交易服务</td>
+                <td>决定下一步该做什么，约束每一步怎样做</td>
+              </tr>
+              <tr>
+                <td>持久化状态</td>
+                <td>JSONL、JSON、SQLite 工件和审计日志</td>
+                <td>让结果能复用、能恢复、能审计</td>
+              </tr>
+              <tr>
+                <td>用户界面</td>
+                <td>聊天页、任务页、证据页、因子页、报告页、风险页</td>
+                <td>把后台状态翻译成读得懂的工作台</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" id="s3">
+          <h2>3. 为什么它不会“算完就忘”：数据、计划、因子、策略和证据如何被保存下来</h2>
+          <p>OpenFinance 的关键设计是：研究对象都先被编号，再被保存。只要对象有版本，后续结果就能引用它；只要引用链条完整，复盘和恢复就不是拍脑袋。</p>
+          <h3>数据不是临时内存，而是可重建的数据集版本</h3>
+          <p>数据集由 <code>MockDataFactory</code> 生成，版本号不是随机字符串，而是由 schema（字段结构）、seed（固定随机种子）和生成配置一起算出的指纹。生成后的数据集实体写到 <code>.openfinance/data/{dataset_version}.json</code>，同时把索引追加到 <code>.openfinance/registry/datasets.jsonl</code>。注册表里还会保存 lineage 和质量报告；这里的 lineage，可以理解成“它是从哪组输入和配置派生出来的血缘记录”，质量报告则会标出缺失率、回填率、异常率，以及是否引入生存者偏差。所谓生存者偏差，就是只保留“活到最后”的样本，结果把效果看得过于乐观。</p>
+          <h3>计划、证据和运行结果都被正式持久化</h3>
+          <p>研究计划写入 <code>.openfinance/registry/plans.jsonl</code>。它除了问题描述，还会收进实验矩阵、候选因子、候选策略族、约束条件，以及 orchestrator 产生的 agent 输出、reasoning 步骤和工具结果。到了这一步，plan 已经是带编排上下文的运行对象，不是静态草稿。证据包进入 <code>.openfinance/registry/evidence.sqlite3</code>，其中每个来源都带有可信度、时效性和评分拆解。当前仓库里，这些证据主要来自本地语料检索，再混入 Mock 新闻和 Mock 宏观适配器；可选的 WebRetriever 并没有默认启用。回测运行写入 <code>.openfinance/registry/runs.jsonl</code>，具体报告落在 <code>.openfinance/data/{run_id}.json</code>，报告里保留了 <code>audit_trace_id</code>、<code>factor_versions</code>、<code>strategy_decision</code>、<code>evidence_refs</code>、订单、成交、持仓、成本和归因。</p>
+          <p>会话记忆同样不会丢在前端本地状态里。<code>.openfinance/registry/chat_sessions.json</code> 会记住 <code>last_run_id</code>、<code>last_plan_id</code>、<code>last_report_id</code>、<code>last_dataset_version</code> 和 <code>last_market</code>；<code>.openfinance/registry/tasks.json</code> 则把父子任务树、进度和结果引用存下来，所以系统重启后也知道哪些任务被中断过。</p>
+          <h3>因子是第一类工件，策略则主要通过运行历史保留下来</h3>
+          <p>因子版本写入 <code>.openfinance/registry/factors.sqlite3</code>，因子工件和健康报告落在 <code>.openfinance/artifacts/factors</code> 下。策略没有单独的 SQLite 注册表。这也说明 OpenFinance 现在更偏向追踪一条研究实验链：策略版本主要通过回测请求和最终报告留档，没有被单独当成主数据对象管理。</p>
+          <table>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>主要持久化位置</th>
+                <th>后续怎么被复用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>数据集</td>
+                <td><code>datasets.jsonl</code> + <code>.openfinance/data/{dataset_version}.json</code></td>
+                <td>因子计算、回测运行、trace 恢复</td>
+              </tr>
+              <tr>
+                <td>研究计划</td>
+                <td><code>plans.jsonl</code></td>
+                <td>复跑、会话延续、trace 恢复、因子与策略生成</td>
+              </tr>
+              <tr>
+                <td>证据包</td>
+                <td><code>evidence.sqlite3</code></td>
+                <td>agent 推理、报告引用、trace 恢复</td>
+              </tr>
+              <tr>
+                <td>因子</td>
+                <td><code>factors.sqlite3</code> + 因子/健康工件文件</td>
+                <td>回测请求、因子详情页、审计关联</td>
+              </tr>
+              <tr>
+                <td>运行与报告</td>
+                <td><code>runs.jsonl</code> + <code>.openfinance/data/{run_id}.json</code></td>
+                <td>对比、再运行、恢复上下文、风险追踪</td>
+              </tr>
+              <tr>
+                <td>审计与审批</td>
+                <td><code>audit.jsonl</code>、<code>approvals.sqlite3</code>、<code>risk_events.sqlite3</code></td>
+                <td>说明谁在何时做了什么，以及为什么被允许、待批或阻断</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="diagram">
+            <strong>图 2　研究对象的血缘链</strong>
+            <div class="diagram-board">
+              <div class="diagram-sequence">
+                <div class="diagram-node diagram-node--accent">
+                  <strong>Request</strong>
+                  <p>Question and constraints.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Research Plan</strong>
+                  <p>Experiment matrix and tool context.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-column">
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Evidence Pack</strong>
+                    <p>Sources with credibility scoring.</p>
+                  </div>
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Dataset Version</strong>
+                    <p>Deterministic data artifact.</p>
+                  </div>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-column">
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Factor Version</strong>
+                    <p>Spec, report, health artifact.</p>
+                  </div>
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Strategy Version</strong>
+                    <p>Decision and execution settings.</p>
+                  </div>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Backtest Run</strong>
+                  <p>Metrics, orders, trades, positions.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-column">
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Audit Trace</strong>
+                    <p>Event trail for replay and inspection.</p>
+                  </div>
+                  <div class="diagram-node diagram-node--plain">
+                    <strong>Final Report</strong>
+                    <p>User-facing summary and linked lineage.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p class="diagram-caption">图 2 画的不是文件顺序，而是对象如何一级一级地产生、引用和回指。每个下游对象都有上游来源，所以系统能复跑、能恢复，也能说明结果是从哪里来的。</p>
+            <p class="diagram-explain">这是一条血缘链：从计划编号开始，证据包、数据版本、因子版本、策略版本、运行编号和审计轨迹会一路接下去，不会彼此断开。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s4">
+          <h2>4. 多个 agent 不是各说各话：它们如何分工、接力和协同</h2>
+          <p>这里的 agent 不是聊天人格，更像一组被 orchestrator 顺序调度的专业视角。研究流水线默认会调用 Buffett、Soros、Simons、Dalio、Kahneman 和 Factor 六个视角。它们收到的是同一问题、同一证据包、同一市场上下文和同一约束，只是关注点不同。</p>
+          <div class="split">
+            <div class="cell">
+              <strong>共享输入</strong>
+              <p>证据包、市场上下文、计划约束、研究问题、会话与任务标识、研究循环上下文。</p>
+            </div>
+            <div class="cell">
+              <strong>各自差异</strong>
+              <p>不同关键词、不同镜头、不同反证查询偏好。比如 Kahneman 会额外做反事实检索，Factor 更关注样本外稳定性和参数脆弱性。</p>
+            </div>
+          </div>
+          <p>它们之所以能接上，靠的是统一的输入约束和统一的输出格式。每个 agent 都必须返回严格 JSON，里面至少要包含结论、理由、证据引用、不确定性和结构化 reasoning 步骤。这样 orchestrator 才能把输出并入同一份 <code>agent_outputs</code>、<code>reasoning_steps_by_agent</code> 和 <code>tool_results</code>。</p>
+          <p>orchestrator 也不只是把原证据包分发出去。它会为每个 agent 构造一轮研究循环：先定义初始证据查询，再自动拼出反证查询，再把初始来源 id 和反向来源 id 都写进 <code>research_loop</code>。所谓“多 agent 协作”，在这里就是一个能执行的协议：每个视角都要给出看法，也都要接受反例检验。</p>
+          <div class="diagram">
+            <strong>图 3　多 agent 接力编排图</strong>
+            <div class="diagram-board">
+              <div class="diagram-relay-track">
+                <div class="diagram-node diagram-node--accent">
+                  <strong>Orchestrator</strong>
+                  <p>Builds dispatch order, shared context, and counter-evidence loop.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">Plan Context</span>
+                    <span class="diagram-chip">Evidence Pack</span>
+                    <span class="diagram-chip">Constraints</span>
+                  </div>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Dispatch Queue</strong>
+                  <p>One agent runs after another with the same task boundary and evidence base.</p>
+                  <div class="diagram-agent-rail">
+                    <div class="diagram-agent-pill">Buffett</div>
+                    <div class="diagram-agent-pill">Soros</div>
+                    <div class="diagram-agent-pill">Simons</div>
+                    <div class="diagram-agent-pill">Dalio</div>
+                    <div class="diagram-agent-pill">Kahne</div>
+                    <div class="diagram-agent-pill">Factor</div>
+                  </div>
+                  <div class="diagram-row" style="margin-top: 12px;">
+                    <div class="diagram-node diagram-node--plain" style="flex:1;">
+                      <strong>Structured Output</strong>
+                      <p>JSON summaries, reasoning steps, and source-linked claims.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node diagram-node--warm">
+                  <strong>Consolidation</strong>
+                  <p>Outputs become structured summaries inside plan tool context.</p>
+                  <div class="diagram-chip-row">
+                    <span class="diagram-chip">Agent Outputs</span>
+                    <span class="diagram-chip">Reasoning Steps</span>
+                    <span class="diagram-chip">Tool Results</span>
+                  </div>
+                </div>
+              </div>
+              <div class="diagram-grid-2">
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Shared Context</strong>
+                  <p>Question, market context, evidence query, counter query, source ids.</p>
+                </div>
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Observable Outputs</strong>
+                  <p>agent.dispatched, reasoning.step.created, tool.call, agent.completed.</p>
+                </div>
+              </div>
+            </div>
+            <p class="diagram-caption">图 3 画的不是并排发言，而是 orchestrator 按顺序接力调度。共享输入一致，输出格式也一致，所以最后能收束成可比较、可审计的结构化结果。</p>
+            <p class="diagram-explain">同一计划进入 orchestrator 后，会依次经历派发、步骤事件、工具调用和完成事件，最后再收束进 <code>tool_context</code>。</p>
+            <p class="diagram-explain">图中的 <code>Kahne</code> 只是为了适应气泡宽度做的缩写，对应正文里的 <code>Kahneman</code> 视角。</p>
+          </div>
+          <p>默认工具边界收得很紧。研究流水线传给 orchestrator 的，是读取数据集版本、读取运行版本、读取市场规则和读取风险控制这四个只读工具；工具注册表里另外还预留了一个高风险的 <code>submit_live_order</code>，但它必须走审批，不能在研究流程里默认越权触发。agent 能查状态，但不能绕过审批去执行高风险动作。</p>
+          <div class="note">
+            <strong>这里的协同本质上是编排，不是自治社会</strong>
+            <p>OpenFinance 没把 agent 做成彼此自由谈判的黑箱社会，而是让它们在统一任务边界内产出可比较、可审计、可回收的结构化结果。研究与风控更需要稳定接口，不需要戏剧化对话。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s5">
+          <h2>5. 可解释性到底解释什么：系统怎样展示过程，又怎样保留边界</h2>
+          <p>OpenFinance 对 reasoning 的处理比较克制。它不会把模型原始思维全文暴露出来，也不会只给一个最终答案。系统展示的是可审计的操作摘要，也就是每一步做了什么、用了哪些证据、信心怎么变化。</p>
+          <h3>被保留下来的，是结构化 reasoning trace</h3>
+          <p>每个 reasoning step 都有固定字段：所属 trace、所属任务、agent 名称、步骤序号、步骤类型、标题、摘要、证据引用、置信度变化、解析错误和 prompt hash。步骤类型也被限制在少量语义明确的类别里，例如 hypothesis、evidence_use、counterevidence_use、revision、decision 和 warning。</p>
+          <p>这类表示方法的好处是，前端可以用它做实时 trace、开发者抽屉和复盘页，后台可以把它写入审计日志，trace 恢复接口也可以重新拼装回来；但它不会泄漏原始 chain-of-thought，因为 agent 提示词本身已经明确要求“只返回严格 JSON，不要包含 private chain-of-thought，只给 user-safe summaries”。</p>
+          <h3>被故意保留边界的，是原始内心过程</h3>
+          <p>在开发者模式里，你能看到的是 <code>prompt_hash</code>、解析是否出错、步骤摘要、引用到的来源，以及最终 agent 输出。这里的 <code>prompt_hash</code> 不是提示词全文，而是提示模板的指纹，用来标记这一步来自哪一版提示。界面保留的是可核对的外显痕迹，不会把私有中间推断整段倒出来。这个边界写在接口上，不靠文案自觉。</p>
+          <div class="split">
+            <div class="cell">
+              <strong>系统愿意公开的解释面</strong>
+              <p>步骤标题、步骤摘要、证据引用、置信度变化、parse error、prompt hash、任务与风险快照、trace restore 的恢复摘要。</p>
+            </div>
+            <div class="cell">
+              <strong>系统刻意不公开的部分</strong>
+              <p>模型未经整理的原始私有思维、未过滤中间草稿、无法作为稳定接口的自由联想内容，以及不带证据锚点的内部推断残片。</p>
+            </div>
+          </div>
+          <div class="warning">
+            <strong>为什么这样设计</strong>
+            <p>研究和风控更关心“你凭什么得出这个结论”。至于模型脑中闪过了什么未过滤念头，既难验证，也容易泄漏不稳定甚至无意义的中间内容。</p>
+          </div>
+          <p>如果 agent 返回的 JSON 解析失败，系统不会把损坏输出直接塞给用户，而是打上 <code>parse_error</code>，再回退到安全的 reasoning 步骤模板。测试专门覆盖了这种情形，确保至少还能看到 hypothesis、decision 和带 parse_error 的 warning，不至于让界面直接空掉。</p>
+          <p>trace 恢复接口也说明，这不是一次性的 UI 技巧。它会从审计日志、运行注册表、计划注册表、证据库和聊天会话记忆里把相关对象重新装回一个上下文包；如果某些工件已经不在了，也会明确标记 <code>partial_restore</code> 和 <code>missing</code>。</p>
+          <table>
+            <thead>
+              <tr>
+                <th>系统展示的 reasoning</th>
+                <th>系统不展示的内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>步骤类型、摘要、证据引用、置信度变化、prompt hash、解析错误</td>
+                <td>原始私有 chain-of-thought 文本</td>
+              </tr>
+              <tr>
+                <td>可以进入 SSE、审计日志、trace 恢复、开发者模式</td>
+                <td>不能被当成稳定接口，也不会作为用户默认可见内容</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" id="s6">
+          <h2>6. 因子和策略不是拍脑袋来的：它们是怎样一步步生成、验证和收敛的</h2>
+          <p>只看聊天结果，很容易以为策略是模型临场想出来的。仓库里的实现并不是这样。因子和策略都会先被压进受约束的规格对象，再交给可重复的计算流程验证。</p>
+          <h3>因子先被压缩成明确的规格</h3>
+          <p>研究计划中的候选因子和实验 variant 会被转成 <code>FactorSpec</code>。这个规格至少包含输入字段及其可用性滞后、参数、变换列表、验证计划、失败条件、成本敏感度和预期持有期。默认变换并不神秘，主要就是动量、均值回归、波动率、成交量惊奇、日内收益和针对加密市场的 carry 代理等几类。这里的 carry 代理，可以粗看成“用可观察到的市场结构去近似持有收益”的替代信号。</p>
+          <p>规格中会保留 <code>availability_lag</code> 和验证区间。这样系统在定义因子时，就把“这个信号何时可见”和“它在样本外还能不能站住”一起记下来，不用等回测结束再补解释。</p>
+          <h3>因子不是只算一条数列，还要生成健康报告</h3>
+          <p>FactorEngine 会产出因子序列、IC、RankIC、衰减曲线、样本内外统计、换手代理和一份健康报告。这里的 IC 和 RankIC，可以粗看成“因子值与后续收益是否同向、排序是否一致”的相关指标；样本内外统计则是在比较训练区和留出区是否一致。健康报告也不是装饰，它会专门做敏感性网格：改窗口、改平滑、改 winsor 阈值，再看指标变化多大。所谓 winsor 阈值，就是用来限制极端值对结果的扭曲。最后关心的是这个因子稳不稳，不只是某次回测好不好看。</p>
+          <p>如果同一个因子版本的工件已经存在，FactorEngine 会直接返回缓存结果。因子版本号既是缓存键，也是血缘键。</p>
+          <h3>策略选择也不是自由创作</h3>
+          <p>StrategyAgent 的提示词和回退逻辑都要求至少比较两个候选：<code>RiskBudgetAllocator</code> 和 <code>EqualWeightAllocator</code>。它会读取市场规则、回撤目标、因子健康报告、换手代理、样本外落差和仓位约束，再在这些条件下给出取舍。这里的策略生成，是在受限候选集合里做比较，不是自由发挥。</p>
+          <p>随后，流水线把选中的策略压成 <code>StrategySpec</code>，里面会写入再平衡频率、回看窗口、信号阈值、仓位配置、风险预算、最大仓位、熔断规则和失败 regime。回测请求再把因子版本、证据引用、策略决策、失败条件和 circuit breaker 一起带入回测引擎。</p>
+          <p>最后怎么收敛，靠的是比较。研究引擎会跑完整个实验矩阵，对每个 variant 保存 factor report、strategy decision、backtest request 和回测指标，然后按目标函数打分，从 Sharpe、收益、最大回撤、换手等维度选出最优实验。</p>
+          <div class="diagram">
+            <strong>图 4　因子与策略生成流水线</strong>
+            <div class="diagram-board">
+              <div class="diagram-sequence">
+                <div class="diagram-node diagram-node--accent">
+                  <strong>Research Plan</strong>
+                  <p>Objectives, constraints, candidate variants.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Experiment Variants</strong>
+                  <p>Market-locked combinations to be tested.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Factor Spec</strong>
+                  <p>Inputs, lags, transforms, validation plan.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Health Check</strong>
+                  <p>IC, RankIC, OOS gap, sensitivity grid.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Strategy Selection</strong>
+                  <p>Constrained choice under market rules and risk targets.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Backtest Runs</strong>
+                  <p>Orders, fills, positions, diagnostics, metrics.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Compare Runs</strong>
+                  <p>Objective scoring across the experiment matrix.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node diagram-node--warm">
+                  <strong>Best Result</strong>
+                  <p>Selected factor, strategy, run, and linked artifacts.</p>
+                </div>
+              </div>
+              <div class="diagram-grid-3" style="margin-top: 12px;">
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Evidence Refs</strong>
+                  <p>Evidence pack ids and source refs stay attached to evaluation.</p>
+                </div>
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Market Rules</strong>
+                  <p>Microstructure constraints shape strategy selection and preflight.</p>
+                </div>
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Failure Conditions</strong>
+                  <p>Risk checks travel with factor and strategy into execution logic.</p>
+                </div>
+              </div>
+            </div>
+            <p class="diagram-caption">图 4 画的是因子与策略的受约束流水线。计划先展开成 variant，再经过因子规格、健康检查、策略选择和回测比较，最后才出现主结果。</p>
+            <p class="diagram-explain">健康报告不是附属物，它是策略选择之前的约束；回测也还不是终点，后面还要经过跨实验比较，才会产生“最佳结果”。</p>
+          </div>
+          <div class="note">
+            <strong>约束还体现在 DSL 层</strong>
+            <p>工作台支持直接提交公式型因子，但公式 DSL 只允许少量白名单函数和简单算术，例如 <code>ts_mean</code>、<code>ts_std</code>、<code>shift</code>、<code>rank</code>、<code>zscore</code>、<code>clip</code> 和 <code>winsorize</code>。AST 校验会阻止任意语法进入执行器，所以这不是把 Python 代码随手丢给解释器。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s7">
+          <h2>7. 为什么系统里一定要有上下文锁定、预检查、审批和熔断</h2>
+          <p>量化研究里常见的错误，不在算法本身，而在上下文偷偷漂移、市场规则被忽略，或者风险门禁被绕开。OpenFinance 在这些地方卡得很紧。</p>
+          <h3>上下文锁定：先防止市场偷换</h3>
+          <p>一旦计划创建完成，系统会把计划市场和各个 variant 市场都锁到同一个规范化市场值上。这样做是为了避免一个问题说的是 JP，某个实验 variant 却偷偷跑成 US。测试也覆盖了这种场景：先问 Nikkei，再说“给我一个低回撤策略并回测”，后续流水线会沿用 JP；如果你显式改说 US，才会覆盖掉会话记忆。</p>
+          <h3>预检查：先看能不能迁移，再决定跑不跑</h3>
+          <p>市场迁移预检查尤其重要。当前代码会对 CN 市场给出额外提示和阻断条件，例如 T+1、整手交易、交易时段覆盖、日内高成本因子风险和高换手不适配。如果 warning 达到阻断级别，流水线不会直接往下跑，除非你显式确认，或者允许系统根据市场规则做自动调整。</p>
+          <p>自动调整会直接改参数，例如降低换手、拉长窗口、切换再平衡频率、开启整手取整、调整预期持有期。preflight 在这里不是提示框，而是控制流上的闸门。</p>
+          <h3>审批与熔断：谁能动，什么时候必须停</h3>
+          <p>审批状态机被写得很清楚：<code>requested → pending → approved → enabled → revoked/expired</code>。不论是解锁 simulated live trading，还是调用高风险工具，都要经过这条链。更细的一点是，交易下单路由要求纸交易或模拟实盘订单至少带上 <code>plan_id</code> 或 <code>evidence_pack_id</code>，也就是一笔动作必须能追到研究来路。</p>
+          <p>TradingService 同时维护风险门、风险监控器和 kill switch。运行时失败条件如流动性枯竭、异常波动尖刺、拥挤度代理过高，会被评估成 warn 或 block；若风险监控器产生高严重度事件，系统还能自动打开 kill switch。</p>
+          <div class="warning">
+            <strong>当前仓库的边界</strong>
+            <p>这里所谓的“实盘”路径，实际上通过 <code>SimBrokerAdapter</code> 走的是模拟实盘流程，不是接到真实券商。审批、风控和熔断这些机制都在，但它们现在保护的是一个研究型、演练型执行环境。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s8">
+          <h2>8. 用一个完整例子，看懂一次请求如何走到最终结果</h2>
+          <p>用一个仓库测试里真实覆盖过的例子最容易看清机制：先问一句“日经最近怎么样”，再接一句“给我一个低回撤策略并回测”。第二句里其实没有再写 JP，但系统还是会沿用 JP 上下文。</p>
+          <div class="chain">
+            <div class="chain-step" data-step="1">
+              <strong>第一次消息：一般信息查询</strong>
+              <p>系统把“日经最近怎么样”识别成 general info query，调用知识服务检索本地语料与外部 mock 来源，生成带引用的摘要，同时在会话记忆里写下 <code>last_market=JP</code>。这一步不会创建完整实验流水线，但会留下 reasoning 摘要和引用。</p>
+            </div>
+            <div class="chain-step" data-step="2">
+              <strong>第二次消息：研究型请求</strong>
+              <p>“给我一个低回撤策略并回测”被识别成 pipeline research。由于消息里没显式写市场，解析器会回看会话记忆，于是自动绑定到 JP。聊天接口立刻返回一个父任务 id，前端开始订阅后续事件。</p>
+            </div>
+            <div class="chain-step" data-step="3">
+              <strong>生成计划与证据</strong>
+              <p>研究引擎创建 <code>plan_id</code>，锁定市场为 JP，并把问题扩成研究计划。随后生成 <code>evidence_pack_id</code>，把来源列表和可信度评分写入证据库，同时在事件流里发出 <code>artifact.created</code>。</p>
+            </div>
+            <div class="chain-step" data-step="4">
+              <strong>多视角 agent 接力</strong>
+              <p>Buffett、Soros、Simons、Dalio、Kahneman、Factor 按顺序跑，每个都带着初始证据和反证线索产出结构化摘要。Kahneman 还会额外拉一轮反事实检索，用来下调过度自信的初始判断。</p>
+            </div>
+            <div class="chain-step" data-step="5">
+              <strong>准备数据并跑实验矩阵</strong>
+              <p>系统生成一份 JP 市场的 mock 数据集，得到 <code>dataset_version</code>。然后对计划里的多个 variant 逐个做因子计算、因子健康报告、策略选择和回测运行，每个 variant 都带着自己的 <code>factor_version</code>、<code>strategy_version</code> 和 <code>run_id</code>。</p>
+            </div>
+            <div class="chain-step" data-step="6">
+              <strong>选最佳实验，并把结果挂回会话</strong>
+              <p>系统按目标函数比较所有实验，选出最佳 run，生成最终报告，必要时再走一笔纸交易演练。完成后，会话记住这次的 <code>last_run_id</code>、<code>last_plan_id</code> 和 <code>last_dataset_version</code>，于是下一句“只把成本翻倍再跑一次”就有了明确起点。</p>
+            </div>
+          </div>
+          <div class="diagram">
+            <strong>图 5　一次请求的端到端生命周期</strong>
+            <div class="diagram-board">
+              <div class="diagram-sequence">
+                <div class="diagram-node diagram-node--accent">
+                  <strong>User Request</strong>
+                  <p>Natural language request inside a chat session.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Accepted Task</strong>
+                  <p>Parent task id and live event stream start here.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Research Plan</strong>
+                  <p>Market lock, experiment matrix, constraints.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Evidence Pack</strong>
+                  <p>Local corpus plus mock external sources.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Agent Reasoning</strong>
+                  <p>Sequential expert outputs and structured steps.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Dataset Version</strong>
+                  <p>Deterministic artifact for repeatable experiments.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node">
+                  <strong>Variant Runs</strong>
+                  <p>Factor, strategy, backtest, comparison loop.</p>
+                </div>
+                <div class="diagram-arrow">→</div>
+                <div class="diagram-node diagram-node--warm">
+                  <strong>Final Report</strong>
+                  <p>Best run, metrics, lineage, and linked artifacts.</p>
+                </div>
+              </div>
+              <div class="diagram-grid-2" style="margin-top: 12px;">
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Risk Surface</strong>
+                  <p>Approval state, kill switch, and risk snapshot stay observable.</p>
+                </div>
+                <div class="diagram-callout">
+                  <strong class="diagram-mini-title">Session Memory</strong>
+                  <p>last_market, last_plan_id, last_run_id, last_dataset_version.</p>
+                </div>
+              </div>
+            </div>
+            <p class="diagram-caption">图 5 画的是一次请求从进入系统到产出最终报告的整条生命周期。最后留下来的，是后续还可以继续使用的计划、证据、版本、运行结果和会话记忆。</p>
+            <p class="diagram-explain">聊天文本只是其中一层可见结果。真正留下来的，是 JP 上下文、计划、证据包、数据版本、多组实验结果、最佳报告，以及风险和会话状态的更新。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s9">
+          <h2>9. 这套架构真正解决了什么问题，又在哪些地方仍然有限</h2>
+          <h3>它解决的是：答完以后还能不能接着做事</h3>
+          <p>很多 AI 研究原型都能写出一个貌似合理的策略解释，但一旦你问“这结论用了哪份数据”“再跑一次时复用了什么”“如果换市场为什么被拦住”“这笔动作是谁批准的”，系统就接不上了。OpenFinance 主要补的，就是这块断点。</p>
+          <ul>
+            <li>自然语言请求会落成一串版本化对象，所以结果可以复跑、比较和恢复。</li>
+            <li>多 agent 输出被压成统一结构，不同视角的分歧和共识都能进审计面。</li>
+            <li>reasoning 以用户安全的操作摘要呈现，可解释性和私有推理边界同时保留下来。</li>
+            <li>风控、审批和熔断就在主流程里，不是回测后的附页。</li>
+          </ul>
+          <h3>它现在的限制也必须说清楚</h3>
+          <ul>
+            <li>当前默认证据体系并不是实时互联网或真实终端数据，而是本地语料加 Mock 新闻、Mock 宏观源。</li>
+            <li>当前数据集来自 <code>MockDataFactory</code>，所以回测是可复现实验，不是对真实交易历史的完整映射。</li>
+            <li>LLM 提供器默认允许 stub 模式，也就是在没有远程模型时退回到本地占位或模板化输出，因此系统仍能跑通流程，但“智能度”会明显退化。</li>
+            <li>SSE 事件总线是内存态的，实时回放窗口很短；真正长期保存的是审计和工件，而不是整条实时消息流。</li>
+            <li>模拟实盘路径仍然是模拟，不应被误解为真实生产交易接入。</li>
+          </ul>
+          <div class="note">
+            <strong>更合适的定位</strong>
+            <p>把 OpenFinance 定位成一个可审计、可复现的研究与风控工作台，会比把它当成生产交易平台更准确。它已经把研究过程工程化了，但还没有越过真实市场基础设施那道门槛。</p>
+          </div>
+        </section>
+
+        <section class="panel" id="s10">
+          <h2>10. 读完前文后，你需要知道的几个关键词</h2>
+          <p>下面这些词是 OpenFinance 的骨架词汇。理解它们，基本就理解了系统为什么能复用、能审计、也为什么有些地方必须阻断。</p>
+          <div class="glossary">
+            <div class="term"><strong>trace_id</strong><p>一条执行链的总标识。计划、回测、审计事件和 trace 恢复都围着它转。</p></div>
+            <div class="term"><strong>task_id / parent_task_id</strong><p>运行时任务标识。前端任务树和后台异步执行靠它们串起来。</p></div>
+            <div class="term"><strong>plan_id</strong><p>研究计划编号。它把问题、实验矩阵、候选因子、候选策略和 agent 摘要固定下来。</p></div>
+            <div class="term"><strong>evidence_pack_id</strong><p>证据包编号。对应一组带可信度和时效评分的来源集合，可以被 agent、报告和 trace 恢复复用。</p></div>
+            <div class="term"><strong>dataset_version</strong><p>数据集版本号。由 schema、seed 和配置指纹化而来，用来保证“同一输入”有稳定身份。</p></div>
+            <div class="term"><strong>factor_version</strong><p>因子规格版本号。既是血缘键，也是缓存键，还能指回健康报告工件。</p></div>
+            <div class="term"><strong>strategy_version</strong><p>策略规格版本号。当前主要通过回测请求和报告持久化，而不是独立策略注册表。</p></div>
+            <div class="term"><strong>variant</strong><p>实验变体。表示同一研究目标下的一组具体参数组合，系统会把多个 variant 放进实验矩阵里并逐个比较。</p></div>
+            <div class="term"><strong>run_id</strong><p>一次回测运行的编号。对应最终报告、指标、订单、成交、持仓和成本拆分。</p></div>
+            <div class="term"><strong>IC / RankIC</strong><p>衡量因子是否和后续收益方向、排序关系一致的指标。它们不是最终收益本身，而是因子有效性的中间检验。</p></div>
+            <div class="term"><strong>reasoning step</strong><p>系统展示给用户和开发者的推理摘要单位，包含步骤类型、摘要、证据引用和置信度变化。</p></div>
+            <div class="term"><strong>prompt_hash</strong><p>提示模板的指纹，而不是提示词全文。它让你知道某一步来自哪一版模板，同时不暴露原始提示内容。</p></div>
+            <div class="term"><strong>trace restore</strong><p>把一条旧的执行链，按审计日志和注册表中的对象重新拼回可读上下文的恢复能力。</p></div>
+            <div class="term"><strong>preflight</strong><p>正式运行前的市场规则预检查。它不是提醒弹窗，而是可以真正阻断执行的闸门。</p></div>
+            <div class="term"><strong>approval</strong><p>高风险动作的审批状态链。保证“谁允许了什么”能被记录，而不是只看最终动作。</p></div>
+            <div class="term"><strong>stub mode</strong><p>没有远程模型时的占位运行模式。流程能继续跑，但输出会更接近模板或受限结果。</p></div>
+            <div class="term"><strong>kill switch</strong><p>风控熔断开关。既能人工打开，也能由高严重度风险事件自动触发。</p></div>
+          </div>
+        </section>
+
+        <section class="footer">
+          <p>OpenFinance 的价值，在于它把研究、验证、解释、审批和风险控制放进同一条可回溯链里。链条不断，结果就能复盘，前后动作也能对上。这时它更像一台研究工作台，而不只是一个会说话的 demo。</p>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

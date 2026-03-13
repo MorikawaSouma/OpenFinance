@@ -85,6 +85,7 @@ def healthz() -> dict[str, str]:
 def stream() -> StreamingResponse:
     sub_id, sub_q, replay = event_bus.subscribe(replay=20)
     hello = {
+        "event_id": str(uuid4()),
         "type": "chat.delta",
         "trace_id": str(uuid4()),
         "session_id": "sse",
@@ -94,23 +95,30 @@ def stream() -> StreamingResponse:
     logger.info("SSE subscriber connected: %s", sub_id)
 
     def event_gen():
+        def _encode_event(item: dict) -> str:
+            event_id = str(item.get("event_id") or "")
+            if event_id:
+                return f"id: {event_id}\ndata: {json.dumps(item)}\n\n"
+            return f"data: {json.dumps(item)}\n\n"
+
         try:
-            yield f"data: {json.dumps(hello)}\n\n"
+            yield _encode_event(hello)
             for item in replay:
-                yield f"data: {json.dumps(item)}\n\n"
+                yield _encode_event(item)
             while True:
                 try:
                     item = sub_q.get(timeout=15)
-                    yield f"data: {json.dumps(item)}\n\n"
+                    yield _encode_event(item)
                 except queue.Empty:
                     heartbeat = {
+                        "event_id": str(uuid4()),
                         "type": "audit.trace",
                         "trace_id": str(uuid4()),
                         "session_id": "sse",
                         "timestamp": datetime.now(UTC).isoformat(),
                         "payload": {"heartbeat": True},
                     }
-                    yield f"data: {json.dumps(heartbeat)}\n\n"
+                    yield _encode_event(heartbeat)
         finally:
             event_bus.unsubscribe(sub_id)
             logger.info("SSE subscriber disconnected: %s", sub_id)

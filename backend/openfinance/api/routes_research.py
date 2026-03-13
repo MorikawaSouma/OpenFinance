@@ -2,8 +2,10 @@ from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException
 
+from openfinance.api.routes_pipeline import PipelineRunTaskRequest, submit_pipeline_run_task
 from openfinance.core.audit import FileAuditStore
 from openfinance.core.config import settings
+from openfinance.core.tasks import TaskRecord
 from openfinance.data.registry import DatasetRegistry
 from openfinance.quant.backtest.run_registry import RunRegistry
 from openfinance.research.pipeline import (
@@ -61,3 +63,8 @@ def run_from_plan(request: PipelineRequest) -> PipelineResponse:
                 "action_required": "Set migration_preflight_confirmed=true or auto_adjust_for_market_rules=true.",
             },
         ) from exc
+
+
+@router.post("/run/submit", response_model=TaskRecord)
+def run_from_plan_submit(request: PipelineRunTaskRequest) -> TaskRecord:
+    return submit_pipeline_run_task(request)

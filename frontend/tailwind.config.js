@@ -10,7 +10,7 @@ module.exports = {
     extend: {
       fontFamily: {
         sans: [
-          "var(--font-inter)",
+          "var(--font-body)",
           "var(--font-noto-sc)",
           "Noto Sans SC",
           "system-ui",
@@ -20,6 +20,14 @@ module.exports = {
           "Hiragino Sans GB",
           "Microsoft YaHei",
           "sans-serif",
+        ],
+        display: [
+          "var(--font-display)",
+          "Source Serif 4",
+          "Noto Serif SC",
+          "Songti SC",
+          "STSong",
+          "serif",
         ],
       },
       colors: {

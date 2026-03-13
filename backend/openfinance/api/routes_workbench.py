@@ -1,4 +1,5 @@
 import json
+import logging
 import statistics
 import time
 from datetime import date
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from openfinance.core.audit import AuditLogEntry, FileAuditStore
 from openfinance.core.config import settings
 from openfinance.core.events import event_bus
-from openfinance.core.tasks import TaskManager, TaskRecord
+from openfinance.core.tasks import TaskRecord, get_task_manager
 from openfinance.data.mock_factory import MockDataFactory, MockDatasetConfig
 from openfinance.data.registry import DatasetRegistry
 from openfinance.quant.backtest.migration import MigrationChecker, MigrationWarning
@@ -36,6 +37,7 @@ from openfinance.quant.checks.failure_conditions import normalize_failure_condit
 from openfinance.quant.factors.registry import FactorRegistry
 
 router = APIRouter(prefix="/workbench", tags=["workbench"])
+logger = logging.getLogger(__name__)
 
 
 class GenerateDatasetRequest(BaseModel):
@@ -116,6 +118,8 @@ class MultiMarketCompareRequest(BaseModel):
     commission_bps: float = Field(default=5.0, ge=0.0, le=200.0)
     slippage_bps: float = Field(default=8.0, ge=0.0, le=200.0)
     symbol_map: dict[str, str] = Field(default_factory=dict)
+    session_id: str | None = None
+    request_token: str | None = None
 
 
 class MarketCompareRow(BaseModel):
@@ -132,6 +136,8 @@ class MultiMarketCompareResponse(BaseModel):
     strategy_spec: dict[str, Any]
     rows: list[MarketCompareRow]
     diff_table: list[dict[str, Any]]
+    parent_task_id: str | None = None
+    child_task_ids: list[str] = Field(default_factory=list)
     migration_warnings: list[MigrationWarning] = Field(default_factory=list)
     market_warnings: dict[str, list[MigrationWarning]] = Field(default_factory=dict)
 
@@ -159,6 +165,8 @@ class RobustnessRunRequest(BaseModel):
     threshold_grid: list[float] = Field(default_factory=list)
     rebalance_grid: list[str] = Field(default_factory=list)
     max_variants: int = Field(default=12, ge=6, le=24)
+    session_id: str | None = None
+    request_token: str | None = None
 
 
 class FactorSummary(BaseModel):
@@ -187,6 +195,8 @@ class FactorRunRequest(BaseModel):
     decay_lags: int = Field(default=5, ge=1, le=20)
     universe: list[str] = Field(default_factory=list)
     seed: int = 42
+    session_id: str | None = None
+    request_token: str | None = None
 
 
 class FactorRunResponse(BaseModel):
@@ -209,6 +219,8 @@ class FactorMultiMarketCompareRequest(BaseModel):
     end: str = "2024-06-30"
     seed: int = 42
     eval_metrics: list[str] = Field(default_factory=lambda: ["IC", "RankIC", "decay", "coverage"])
+    session_id: str | None = None
+    request_token: str | None = None
 
 
 class FactorMarketMetricRow(BaseModel):
@@ -243,11 +255,13 @@ class FactorMultiMarketCompareResponse(BaseModel):
     per_market_metrics: list[FactorMarketMetricRow]
     per_market_decay_curves: list[FactorMarketDecayCurve]
     summary_insights: list[str]
+    parent_task_id: str | None = None
+    child_task_ids: list[str] = Field(default_factory=list)
 
 
 @lru_cache(maxsize=1)
-def _task_manager() -> TaskManager:
-    return TaskManager()
+def _task_manager():
+    return get_task_manager()
 
 
 @lru_cache(maxsize=1)
@@ -302,12 +316,40 @@ def _emit_event(event_type: str, trace_id: UUID, payload: dict[str, Any], sessio
     )
 
 
+def _task_payload(task: TaskRecord, **extra: Any) -> dict[str, Any]:
+    payload = {
+        "task_id": str(task.task_id),
+        "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
+        "type": task.task_type,
+        "status": task.status,
+        "progress": task.progress,
+        "message": task.message,
+        "result_ref": task.result_ref,
+        "error": task.error,
+        "task": task.model_dump(mode="json"),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _emit_task_state(event_type: str, trace_id: UUID, task: TaskRecord, **extra: Any) -> None:
+    payload = _task_payload(task, **extra)
+    session_id = str(
+        extra.get("session_id")
+        or (task.meta or {}).get("session_id")
+        or payload.get("session_id")
+        or "workbench"
+    ).strip() or "workbench"
+    payload["session_id"] = session_id
+    _write_audit(event_type, trace_id, payload)
+    _emit_event(event_type, trace_id, payload, session_id=session_id)
+
+
 def _run_dataset_job(task_id: UUID, trace_id: UUID, req: GenerateDatasetRequest) -> None:
     tm = _task_manager()
     try:
-        tm.update(task_id, status="running", progress=10, message="preparing config")
-        _write_audit("task.progress", trace_id, {"task_id": str(task_id), "progress": 10})
-        _emit_event("task.progress", trace_id, {"task_id": str(task_id), "progress": 10})
+        task = tm.update(task_id, status="running", progress=10, message="preparing config")
+        _emit_task_state("task.progress", trace_id, task)
         time.sleep(0.2)
 
         config = MockDatasetConfig(
@@ -323,9 +365,8 @@ def _run_dataset_job(task_id: UUID, trace_id: UUID, req: GenerateDatasetRequest)
             high_vol_end_day=req.high_vol_end_day,
             high_vol_scale=req.high_vol_scale,
         )
-        tm.update(task_id, progress=55, message="generating dataset")
-        _write_audit("task.progress", trace_id, {"task_id": str(task_id), "progress": 55})
-        _emit_event("task.progress", trace_id, {"task_id": str(task_id), "progress": 55})
+        task = tm.update(task_id, progress=55, message="generating dataset")
+        _emit_task_state("task.progress", trace_id, task)
         dataset = MockDataFactory().generate(config)
         entry = _dataset_registry().register(dataset)
 
@@ -334,21 +375,18 @@ def _run_dataset_job(task_id: UUID, trace_id: UUID, req: GenerateDatasetRequest)
             "dataset_version": entry.dataset_version,
             "artifact_path": entry.artifact_path,
         }
-        tm.update(task_id, status="done", progress=100, message="dataset ready", result=result)
-        _write_audit("task.done", trace_id, {"task_id": str(task_id), "result": result})
-        _emit_event("task.done", trace_id, {"task_id": str(task_id), "result": result})
+        task = tm.update(task_id, status="done", progress=100, message="dataset ready", result=result)
+        _emit_task_state("task.done", trace_id, task)
     except Exception as ex:
-        tm.update(task_id, status="failed", progress=100, message="dataset failed", error=str(ex))
-        _write_audit("task.done", trace_id, {"task_id": str(task_id), "error": str(ex)})
-        _emit_event("task.done", trace_id, {"task_id": str(task_id), "error": str(ex)})
+        task = tm.update(task_id, status="error", progress=100, message="dataset failed", error=str(ex))
+        _emit_task_state("task.error", trace_id, task)
 
 
 def _run_backtest_job(task_id: UUID, trace_id: UUID, req: RunBacktestTaskRequest) -> None:
     tm = _task_manager()
     try:
-        tm.update(task_id, status="running", progress=15, message="loading dataset")
-        _write_audit("task.progress", trace_id, {"task_id": str(task_id), "progress": 15})
-        _emit_event("task.progress", trace_id, {"task_id": str(task_id), "progress": 15})
+        task = tm.update(task_id, status="running", progress=15, message="loading dataset")
+        _emit_task_state("task.progress", trace_id, task)
         time.sleep(0.2)
 
         dataset_version = req.dataset_version
@@ -364,9 +402,8 @@ def _run_backtest_job(task_id: UUID, trace_id: UUID, req: RunBacktestTaskRequest
             audit_store=_audit_store(),
             report_root=settings.data_root,
         )
-        tm.update(task_id, progress=65, message="running backtest")
-        _write_audit("task.progress", trace_id, {"task_id": str(task_id), "progress": 65})
-        _emit_event("task.progress", trace_id, {"task_id": str(task_id), "progress": 65})
+        task = tm.update(task_id, progress=65, message="running backtest")
+        _emit_task_state("task.progress", trace_id, task)
         report = runner.run(
             BacktestRequest(
                 dataset_version=dataset_version,
@@ -385,15 +422,20 @@ def _run_backtest_job(task_id: UUID, trace_id: UUID, req: RunBacktestTaskRequest
             "audit_trace_id": str(report.audit_trace_id),
             "report_ready": True,
         }
-        tm.update(task_id, status="done", progress=100, message="backtest complete", result=result)
-        _write_audit("report.ready", trace_id, {"task_id": str(task_id), "result": result}, report.run_id)
-        _write_audit("task.done", trace_id, {"task_id": str(task_id), "result": result}, report.run_id)
-        _emit_event("report.ready", trace_id, {"task_id": str(task_id), "result": result})
-        _emit_event("task.done", trace_id, {"task_id": str(task_id), "result": result})
+        task = tm.update(
+            task_id,
+            status="done",
+            progress=100,
+            message="backtest complete",
+            result=result,
+            result_ref={"run_id": str(report.run_id), "report_id": str(report.run_id)},
+        )
+        _write_audit("report.ready", trace_id, _task_payload(task, result=result), report.run_id)
+        _emit_event("report.ready", trace_id, _task_payload(task, result=result))
+        _emit_task_state("task.done", trace_id, task)
     except Exception as ex:
-        tm.update(task_id, status="failed", progress=100, message="backtest failed", error=str(ex))
-        _write_audit("task.done", trace_id, {"task_id": str(task_id), "error": str(ex)})
-        _emit_event("task.done", trace_id, {"task_id": str(task_id), "error": str(ex)})
+        task = tm.update(task_id, status="error", progress=100, message="backtest failed", error=str(ex))
+        _emit_task_state("task.error", trace_id, task)
 
 
 def _resolve_dataset_version(dataset_version: str | None) -> str:
@@ -603,27 +645,58 @@ def get_dataset(dataset_version: str) -> dict[str, Any]:
 
 @router.post("/datasets/generate", response_model=TaskRecord)
 def create_dataset_task(request: GenerateDatasetRequest) -> TaskRecord:
-    task = _task_manager().create(task_type="dataset.generate", message="task created")
+    task = _task_manager().create(task_type="dataset.generate", message="queued")
     trace_id = uuid4()
-    _write_audit("task.created", trace_id, {"task_id": str(task.task_id), "type": task.task_type})
-    _emit_event("task.created", trace_id, {"task_id": str(task.task_id), "type": task.task_type})
+    _emit_task_state("task.created", trace_id, task)
     Thread(target=_run_dataset_job, args=(task.task_id, trace_id, request), daemon=True).start()
     return task
 
 
 @router.post("/backtests/run", response_model=TaskRecord)
 def create_backtest_task(request: RunBacktestTaskRequest) -> TaskRecord:
-    task = _task_manager().create(task_type="backtest.run", message="task created")
+    task = _task_manager().create(task_type="backtest.run", message="queued")
     trace_id = uuid4()
-    _write_audit("task.created", trace_id, {"task_id": str(task.task_id), "type": task.task_type})
-    _emit_event("task.created", trace_id, {"task_id": str(task.task_id), "type": task.task_type})
+    _emit_task_state("task.created", trace_id, task)
     Thread(target=_run_backtest_job, args=(task.task_id, trace_id, request), daemon=True).start()
     return task
 
 
 @router.get("/tasks", response_model=list[TaskRecord])
-def list_tasks() -> list[TaskRecord]:
-    return _task_manager().list_tasks()
+def list_tasks(session_id: str | None = Query(default=None)) -> list[TaskRecord]:
+    rows = _task_manager().list_tasks()
+    target_session = str(session_id or "").strip()
+    if not target_session:
+        return rows
+
+    by_id = {row.task_id: row for row in rows}
+    selected: set[UUID] = set()
+    queue: list[UUID] = []
+
+    for row in rows:
+        row_session = str((row.meta or {}).get("session_id") or "").strip()
+        if row_session == target_session:
+            selected.add(row.task_id)
+            queue.append(row.task_id)
+
+    if not selected:
+        return []
+
+    while queue:
+        current = queue.pop()
+        current_row = by_id.get(current)
+        if current_row is None:
+            continue
+        parent_id = current_row.parent_task_id
+        if parent_id and parent_id not in selected:
+            selected.add(parent_id)
+            queue.append(parent_id)
+        for candidate in rows:
+            if candidate.parent_task_id == current and candidate.task_id not in selected:
+                selected.add(candidate.task_id)
+                queue.append(candidate.task_id)
+
+    filtered = [row for row in rows if row.task_id in selected]
+    return sorted(filtered, key=lambda x: x.created_at, reverse=True)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRecord)
@@ -674,6 +747,9 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
 
     compare_id = f"mmc_{uuid4().hex[:12]}"
     trace_id = uuid4()
+    session_id = str(request.session_id or "").strip()
+    request_token = str(request.request_token or "").strip()
+    tm = _task_manager()
     migration_checker = MigrationChecker()
     runner = BacktestRunner(
         dataset_registry=_dataset_registry(),
@@ -698,67 +774,252 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
         "start": request.start,
         "end": request.end,
     }
+    parent_task = tm.create(
+        task_type="multi_market.compare",
+        message="queued",
+        status="queued",
+        meta={
+            "compare_id": compare_id,
+            "markets": markets,
+            "strategy_id": request.strategy_id,
+            "strategy_version": request.strategy_version,
+            "session_id": session_id,
+            "request_token": request_token,
+        },
+    )
+    logger.info("multi_market.compare parent_task created: %s", parent_task.task_id)
+    _emit_task_state("task.created", trace_id, parent_task, role="parent", compare_id=compare_id)
+    child_by_market: dict[str, UUID] = {}
+    child_task_ids: list[str] = []
+    for market in markets:
+        child = tm.create(
+            task_type="multi_market.market_run",
+            message=f"queued: {market}",
+            parent_task_id=parent_task.task_id,
+            status="queued",
+            meta={
+                "market": market,
+                "compare_id": compare_id,
+                "session_id": session_id,
+                "request_token": request_token,
+            },
+        )
+        child_by_market[market] = child.task_id
+        child_task_ids.append(str(child.task_id))
+        _emit_task_state(
+            "task.created",
+            trace_id,
+            child,
+            role="child",
+            parent_task_id=str(parent_task.task_id),
+            market=market,
+            compare_id=compare_id,
+        )
     try:
         start_date = date.fromisoformat(request.start)
         end_date = date.fromisoformat(request.end)
     except ValueError as ex:
+        error_message = "start/end must be YYYY-MM-DD"
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message=error_message,
+            error=error_message,
+        )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent", compare_id=compare_id)
+        for market, child_id in child_by_market.items():
+            child_canceled = tm.update(
+                child_id,
+                status="canceled",
+                progress=100,
+                message=f"canceled: {market}",
+                error=error_message,
+            )
+            _emit_task_state(
+                "task.error",
+                trace_id,
+                child_canceled,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                market=market,
+                compare_id=compare_id,
+            )
         raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD") from ex
     if start_date >= end_date:
+        error_message = "start must be earlier than end"
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message=error_message,
+            error=error_message,
+        )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent", compare_id=compare_id)
+        for market, child_id in child_by_market.items():
+            child_canceled = tm.update(
+                child_id,
+                status="canceled",
+                progress=100,
+                message=f"canceled: {market}",
+                error=error_message,
+            )
+            _emit_task_state(
+                "task.error",
+                trace_id,
+                child_canceled,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                market=market,
+                compare_id=compare_id,
+            )
         raise HTTPException(status_code=400, detail="start must be earlier than end")
+
+    parent_running = tm.update(
+        parent_task.task_id,
+        status="running",
+        progress=5,
+        message=f"queued {len(markets)} market runs",
+    )
+    _emit_task_state("task.progress", trace_id, parent_running, role="parent", compare_id=compare_id)
     rows: list[MarketCompareRow] = []
     market_warnings: dict[str, list[MigrationWarning]] = {}
     flat_warnings: list[MigrationWarning] = []
+    done_markets = 0
+    try:
+        if settings.task_force_error:
+            raise RuntimeError("forced task failure via OPENFINANCE_TASK_FORCE_ERROR=true")
+        for idx, market in enumerate(markets):
+            child_id = child_by_market.get(market)
+            if child_id is not None:
+                child_running = tm.update(child_id, status="running", progress=12, message=f"running: {market}")
+                _emit_task_state(
+                    "task.progress",
+                    trace_id,
+                    child_running,
+                    role="child",
+                    parent_task_id=str(parent_task.task_id),
+                    market=market,
+                    compare_id=compare_id,
+                )
 
-    for idx, market in enumerate(markets):
-        symbol = request.symbol_map.get(market) or _default_symbol_for_market(market)
-        rules = runner.market_rules.get(market)
-        dataset = MockDataFactory().generate(
-            MockDatasetConfig(
-                dataset_id=f"{compare_id}_{market.lower()}",
-                market=market,
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                seed=request.seed + idx,
+            symbol = request.symbol_map.get(market) or _default_symbol_for_market(market)
+            rules = runner.market_rules.get(market)
+            dataset = MockDataFactory().generate(
+                MockDatasetConfig(
+                    dataset_id=f"{compare_id}_{market.lower()}",
+                    market=market,
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    seed=request.seed + idx,
+                )
             )
-        )
-        dataset_entry = _dataset_registry().register(dataset)
-        backtest_request = BacktestRequest(
-            dataset_version=dataset_entry.dataset_version,
-            strategy_id=request.strategy_id,
-            strategy_version=request.strategy_version,
-            market=market,
-            start=request.start,
-            end=request.end,
-            cost_model=CostModel(
-                commission_bps=request.commission_bps,
-                slippage_bps=request.slippage_bps,
-            ),
-            constraints={
-                "strategy_family": request.strategy_family,
-                "rebalance": request.rebalance,
-                "lookback_days": request.lookback_days,
-                "signal_threshold": request.signal_threshold,
-                "position_sizing": request.position_sizing,
-                "risk_budget": request.risk_budget,
-                "max_position": request.max_position,
-                "leverage_limit": request.leverage_limit,
-                "auto_round_lot": request.auto_round_lot,
-            },
-        )
-        current_warnings = migration_checker.check(backtest_request.constraints, market, rules)
-        market_warnings[market] = current_warnings
-        flat_warnings.extend(current_warnings)
-        report = runner.run(backtest_request)
-        rows.append(
-            MarketCompareRow(
+            dataset_entry = _dataset_registry().register(dataset)
+            backtest_request = BacktestRequest(
+                dataset_version=dataset_entry.dataset_version,
+                strategy_id=request.strategy_id,
+                strategy_version=request.strategy_version,
+                market=market,
+                start=request.start,
+                end=request.end,
+                cost_model=CostModel(
+                    commission_bps=request.commission_bps,
+                    slippage_bps=request.slippage_bps,
+                ),
+                constraints={
+                    "strategy_family": request.strategy_family,
+                    "rebalance": request.rebalance,
+                    "lookback_days": request.lookback_days,
+                    "signal_threshold": request.signal_threshold,
+                    "position_sizing": request.position_sizing,
+                    "risk_budget": request.risk_budget,
+                    "max_position": request.max_position,
+                    "leverage_limit": request.leverage_limit,
+                    "auto_round_lot": request.auto_round_lot,
+                },
+            )
+            current_warnings = migration_checker.check(backtest_request.constraints, market, rules)
+            market_warnings[market] = current_warnings
+            flat_warnings.extend(current_warnings)
+            report = runner.run(backtest_request)
+            row = MarketCompareRow(
                 market=market,
                 run_id=str(report.run_id),
                 dataset_version=report.dataset_version,
                 strategy_version=report.strategy_version,
                 metrics=report.metrics,
             )
+            rows.append(row)
+            done_markets += 1
+            if child_id is not None:
+                child_done = tm.update(
+                    child_id,
+                    status="done",
+                    progress=100,
+                    message=f"done: {market}",
+                    result={"metrics": dict(report.metrics)},
+                    result_ref={
+                        "run_id": str(report.run_id),
+                        "report_id": str(report.run_id),
+                        "open_path": f"/reports/{report.run_id}",
+                    },
+                )
+                _emit_task_state(
+                    "task.done",
+                    trace_id,
+                    child_done,
+                    role="child",
+                    parent_task_id=str(parent_task.task_id),
+                    market=market,
+                    compare_id=compare_id,
+                )
+            parent_progress = min(90, 8 + int((done_markets / max(1, len(markets))) * 80))
+            parent_running = tm.update(
+                parent_task.task_id,
+                status="running",
+                progress=parent_progress,
+                message=f"{done_markets}/{len(markets)} market runs completed",
+            )
+            _emit_task_state(
+                "task.progress",
+                trace_id,
+                parent_running,
+                role="parent",
+                compare_id=compare_id,
+                parent_task_id=str(parent_task.task_id),
+            )
+    except Exception as ex:
+        logger.exception("multi_market.compare failed: parent_task_id=%s", parent_task.task_id)
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message="multi-market compare failed",
+            error=str(ex),
         )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent", compare_id=compare_id)
+        for market, child_id in child_by_market.items():
+            child = tm.get(child_id)
+            if child is None or child.status == "done":
+                continue
+            child_error = tm.update(
+                child_id,
+                status="error",
+                progress=100,
+                message=f"canceled due to parent failure: {market}",
+                error=str(ex),
+            )
+            _emit_task_state(
+                "task.error",
+                trace_id,
+                child_error,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                market=market,
+                compare_id=compare_id,
+            )
+        raise
 
     baseline = rows[0]
     baseline_metrics = baseline.metrics
@@ -812,17 +1073,88 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
             "compare_id": compare_id,
             "baseline_market": baseline.market,
             "row_count": len(rows),
+            "parent_task_id": str(parent_task.task_id),
         },
     )
+    parent_done = tm.update(
+        parent_task.task_id,
+        status="done",
+        progress=100,
+        message=f"{done_markets}/{len(markets)} market runs completed",
+        result={
+            "compare_id": compare_id,
+            "baseline_market": baseline.market,
+            "row_count": len(rows),
+            "strategy_spec": strategy_spec,
+            "rows": [row.model_dump(mode="json") for row in rows],
+            "diff_table": diff_table,
+            "migration_warnings": [item.model_dump(mode="json") for item in flat_warnings],
+            "market_warnings": {
+                key: [item.model_dump(mode="json") for item in values] for key, values in market_warnings.items()
+            },
+        },
+        result_ref={
+            "report_id": compare_id,
+            "open_path": f"/reports?compare_id={compare_id}",
+            "compare_path": "/reports",
+        },
+        meta={
+            **(tm.get(parent_task.task_id).meta if tm.get(parent_task.task_id) else {}),
+            "child_task_ids": child_task_ids,
+        },
+    )
+    _emit_task_state(
+        "task.done",
+        trace_id,
+        parent_done,
+        role="parent",
+        compare_id=compare_id,
+        parent_task_id=str(parent_task.task_id),
+    )
+    logger.info("multi_market.compare done: parent_task_id=%s compare_id=%s", parent_task.task_id, compare_id)
     return MultiMarketCompareResponse(
         compare_id=compare_id,
         baseline_market=baseline.market,
         strategy_spec=strategy_spec,
         rows=rows,
         diff_table=diff_table,
+        parent_task_id=str(parent_task.task_id),
+        child_task_ids=child_task_ids,
         migration_warnings=flat_warnings,
         market_warnings=market_warnings,
     )
+
+
+def _wait_task_by_request_token(*, task_type: str, request_token: str, timeout_s: float = 2.5) -> TaskRecord:
+    deadline = time.time() + max(0.2, timeout_s)
+    while time.time() <= deadline:
+        rows = _task_manager().list_tasks()
+        for row in rows:
+            if row.task_type != task_type:
+                continue
+            token = str((row.meta or {}).get("request_token") or "").strip()
+            if token == request_token:
+                return row
+        time.sleep(0.02)
+    raise HTTPException(status_code=500, detail=f"failed to register {task_type} task")
+
+
+@router.post("/reports/multi-market/compare/submit", response_model=TaskRecord)
+def submit_multi_market_compare_task(request: MultiMarketCompareRequest) -> TaskRecord:
+    markets = _normalize_markets(request.markets)
+    if len(markets) < 2:
+        raise HTTPException(status_code=400, detail="at least two valid markets are required")
+    request_token = uuid4().hex
+    submit_request = request.model_copy(update={"request_token": request_token}, deep=True)
+
+    def _worker() -> None:
+        try:
+            compare_multi_market(submit_request)
+        except Exception:
+            logger.exception("submit_multi_market_compare_task worker failed")
+
+    Thread(target=_worker, daemon=True).start()
+    return _wait_task_by_request_token(task_type="multi_market.compare", request_token=request_token)
 
 
 @router.post("/reports/robustness/run", response_model=RobustnessReport)
@@ -880,12 +1212,258 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
         report_root=settings.data_root,
     )
     meta_runner = MetaBacktestRunner(runner)
-    robustness = meta_runner.run(base_request, meta_config)
     trace_id = uuid4()
+    session_id = str(request.session_id or "").strip()
+    request_token = str(request.request_token or "").strip()
+    tm = _task_manager()
+    planned_variants = meta_runner.plan_variants(base_request, meta_config)
+    parent_task = tm.create(
+        task_type="robustness.run",
+        message="queued",
+        status="queued",
+        meta={
+            "market": request.market.upper(),
+            "strategy_id": request.strategy_id,
+            "strategy_version": request.strategy_version,
+            "variant_total": len(planned_variants),
+            "session_id": session_id,
+            "request_token": request_token,
+        },
+    )
+    logger.info("robustness.run parent_task created: %s", parent_task.task_id)
+    _emit_task_state("task.created", trace_id, parent_task, role="parent")
+
+    child_task_map: dict[str, UUID] = {}
+    child_task_ids: list[str] = []
+    for idx, plan in enumerate(planned_variants):
+        child = tm.create(
+            task_type="robustness.variant",
+            message=f"queued: {plan.get('scenario', '')}",
+            parent_task_id=parent_task.task_id,
+            status="queued",
+            meta={
+                "variant_id": str(plan.get("variant_id", "")),
+                "group": str(plan.get("group", "")),
+                "scenario": str(plan.get("scenario", "")),
+                "variant_index": idx + 1,
+                "variant_total": len(planned_variants),
+                "session_id": session_id,
+                "request_token": request_token,
+            },
+        )
+        variant_key = str(plan.get("variant_id", f"variant_{idx + 1}"))
+        child_task_map[variant_key] = child.task_id
+        child_task_ids.append(str(child.task_id))
+        _emit_task_state(
+            "task.created",
+            trace_id,
+            child,
+            role="child",
+            parent_task_id=str(parent_task.task_id),
+            variant_id=variant_key,
+        )
+
+    parent_task = tm.update(
+        parent_task.task_id,
+        status="running",
+        progress=5,
+        message=f"queued {len(planned_variants)} variants",
+    )
+    _emit_task_state(
+        "task.progress",
+        trace_id,
+        parent_task,
+        role="parent",
+        parent_task_id=str(parent_task.task_id),
+        variant_done=0,
+        variant_total=len(planned_variants),
+    )
+
+    completed_children = 0
+
+    def _update_parent_progress(*, progress: int, message: str, stage: str) -> None:
+        parent = tm.update(
+            parent_task.task_id,
+            status="running" if progress < 100 else "done",
+            progress=max(0, min(100, progress)),
+            message=message,
+        )
+        _emit_task_state(
+            "task.progress" if progress < 100 else "task.done",
+            trace_id,
+            parent,
+            role="parent",
+            stage=stage,
+            parent_task_id=str(parent_task.task_id),
+            variant_done=completed_children,
+            variant_total=len(planned_variants),
+        )
+
+    def _on_meta_progress(event: dict[str, Any]) -> None:
+        nonlocal completed_children
+        phase = str(event.get("phase", "")).strip().lower()
+        variant_id = str(event.get("variant_id", "")).strip()
+        child_task_id = child_task_map.get(variant_id)
+        if phase == "variant.start" and child_task_id is not None:
+            child = tm.update(
+                child_task_id,
+                status="running",
+                progress=12,
+                message=f"running: {event.get('scenario', '')}",
+            )
+            _emit_task_state(
+                "task.progress",
+                trace_id,
+                child,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                variant_id=variant_id,
+            )
+            return
+        if phase == "variant.done" and child_task_id is not None:
+            run_id = str(event.get("run_id", ""))
+            metrics = event.get("metrics")
+            child = tm.update(
+                child_task_id,
+                status="done",
+                progress=100,
+                message=f"done: {event.get('scenario', '')}",
+                result={"metrics": metrics if isinstance(metrics, dict) else {}},
+                result_ref={
+                    "run_id": run_id,
+                    "report_id": run_id,
+                    "open_path": f"/reports/{run_id}" if run_id else "",
+                },
+            )
+            _emit_task_state(
+                "task.done",
+                trace_id,
+                child,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                variant_id=variant_id,
+            )
+            completed_children += 1
+            total = max(1, len(planned_variants))
+            progress = min(90, 10 + int((completed_children / total) * 78))
+            _update_parent_progress(
+                progress=progress,
+                message=f"{completed_children}/{len(planned_variants)} variants completed",
+                stage="variants.running",
+            )
+            return
+        if phase == "variants.summary":
+            _update_parent_progress(
+                progress=92,
+                message=f"{completed_children}/{len(planned_variants)} variants completed; building summary",
+                stage="variants.summary",
+            )
+            return
+        if phase == "regime.start":
+            _update_parent_progress(progress=94, message="running regime slices", stage="regime.start")
+            return
+        if phase == "regime.done":
+            count = int(event.get("count", 0) or 0)
+            _update_parent_progress(progress=96, message=f"regime slices done ({count})", stage="regime.done")
+            return
+        if phase == "stress.start":
+            _update_parent_progress(progress=97, message="running stress scenarios", stage="stress.start")
+            return
+        if phase == "stress.done":
+            count = int(event.get("count", 0) or 0)
+            _update_parent_progress(progress=98, message=f"stress scenarios done ({count})", stage="stress.done")
+            return
+        if phase == "finalize":
+            _update_parent_progress(progress=99, message="finalizing robustness report", stage="finalize")
+
+    try:
+        if settings.task_force_error:
+            raise RuntimeError("forced task failure via OPENFINANCE_TASK_FORCE_ERROR=true")
+        robustness = meta_runner.run(base_request, meta_config, progress_callback=_on_meta_progress)
+    except Exception as ex:
+        logger.exception("robustness.run failed: parent_task_id=%s", parent_task.task_id)
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message="robustness failed",
+            error=str(ex),
+        )
+        _emit_task_state(
+            "task.error",
+            trace_id,
+            parent_error,
+            role="parent",
+            parent_task_id=str(parent_task.task_id),
+        )
+        for child_id in child_task_ids:
+            child_uuid = UUID(child_id)
+            row = tm.get(child_uuid)
+            if row is None or row.status == "done":
+                continue
+            child_error = tm.update(
+                child_uuid,
+                status="error",
+                progress=100,
+                message="cancelled due to parent failure",
+                error=str(ex),
+            )
+            _emit_task_state(
+                "task.error",
+                trace_id,
+                child_error,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+            )
+        raise
+
+    summary_ref = f"/reports?tab=robustness&robustness_id={robustness.robustness_id}"
+    parent_done = tm.update(
+        parent_task.task_id,
+        status="done",
+        progress=100,
+        message=f"{completed_children}/{len(planned_variants)} variants completed",
+        result={
+            "robustness_id": robustness.robustness_id,
+            "variant_count": robustness.summary.variant_count,
+            "summary": robustness.summary.model_dump(mode="json"),
+            "report": robustness.model_dump(mode="json"),
+        },
+        result_ref={
+            "report_id": robustness.robustness_id,
+            "open_path": summary_ref,
+            "compare_path": "/reports",
+        },
+        meta={
+            **(tm.get(parent_task.task_id).meta if tm.get(parent_task.task_id) else {}),
+            "child_task_ids": child_task_ids,
+        },
+    )
+    _emit_task_state(
+        "task.done",
+        trace_id,
+        parent_done,
+        role="parent",
+        parent_task_id=str(parent_task.task_id),
+        variant_done=completed_children,
+        variant_total=len(planned_variants),
+    )
+    logger.info("robustness.run done: parent_task_id=%s robustness_id=%s", parent_task.task_id, robustness.robustness_id)
+
+    robustness = robustness.model_copy(
+        update={
+            "parent_task_id": str(parent_task.task_id),
+            "child_task_ids": child_task_ids,
+            "summary_report_ref": summary_ref,
+        },
+        deep=True,
+    )
     _write_audit(
         "workbench.robustness.ready",
         trace_id,
         {
+            "parent_task_id": str(parent_task.task_id),
+            "child_task_ids": child_task_ids,
             "robustness_id": robustness.robustness_id,
             "dataset_version": robustness.dataset_version,
             "strategy_id": robustness.strategy_id,
@@ -898,13 +1476,39 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
         "report.robustness.ready",
         trace_id,
         {
+            "parent_task_id": str(parent_task.task_id),
             "robustness_id": robustness.robustness_id,
             "variant_count": robustness.summary.variant_count,
             "sharpe_std": robustness.summary.sharpe_std,
             "mdd_worst_case": robustness.summary.mdd_worst_case,
+            "summary_report_ref": summary_ref,
         },
     )
     return robustness
+
+
+@router.post("/reports/robustness/run/submit", response_model=TaskRecord)
+def submit_robustness_task(request: RobustnessRunRequest) -> TaskRecord:
+    _resolve_dataset_version(request.dataset_version)
+    try:
+        start_date = date.fromisoformat(request.start)
+        end_date = date.fromisoformat(request.end)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD") from ex
+    if start_date >= end_date:
+        raise HTTPException(status_code=400, detail="start must be earlier than end")
+
+    request_token = uuid4().hex
+    submit_request = request.model_copy(update={"request_token": request_token}, deep=True)
+
+    def _worker() -> None:
+        try:
+            run_robustness(submit_request)
+        except Exception:
+            logger.exception("submit_robustness_task worker failed")
+
+    Thread(target=_worker, daemon=True).start()
+    return _wait_task_by_request_token(task_type="robustness.run", request_token=request_token)
 
 
 @router.get("/strategies", response_model=list[StrategySummary])
@@ -1108,7 +1712,31 @@ def run_formula_factor(request: FactorRunRequest) -> FactorRunResponse:
             out_sample_end="2024-12-31",
         ),
     )
+    trace_id = uuid4()
+    session_id = str(request.session_id or "").strip()
+    request_token = str(request.request_token or "").strip()
+    tm = _task_manager()
+    parent_task = tm.create(
+        task_type="factor.run",
+        message="queued",
+        status="queued",
+        meta={
+            "factor_id": request.factor_id,
+            "factor_version": request.factor_version or spec.factor_version,
+            "dataset_version": dataset_version,
+            "session_id": session_id,
+            "request_token": request_token,
+        },
+    )
+    _emit_task_state("task.created", trace_id, parent_task, role="parent")
     try:
+        parent_running = tm.update(
+            parent_task.task_id,
+            status="running",
+            progress=40,
+            message="running factor validation and compute",
+        )
+        _emit_task_state("task.progress", trace_id, parent_running, role="parent", stage="factor.run")
         result = _factor_engine().run(
             factor_spec=spec,
             dataset_version=dataset_version,
@@ -1116,20 +1744,28 @@ def run_formula_factor(request: FactorRunRequest) -> FactorRunResponse:
             seed=request.seed,
         )
     except ValueError as ex:
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message="factor run failed",
+            error=str(ex),
+        )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent")
         raise HTTPException(status_code=400, detail=str(ex)) from ex
-    trace_id = uuid4()
-    _write_audit(
-        "factor.health_report.linked",
-        trace_id,
-        {
-            "factor_id": result.factor_id,
-            "factor_version": result.factor_version,
-            "dataset_version": result.dataset_version,
-            "factor_artifact_path": result.artifact_path,
-            "health_report_artifact_path": result.report.health_report_artifact_path,
-        },
-    )
-    return FactorRunResponse(
+    except Exception as ex:
+        logger.exception("factor.run failed: parent_task_id=%s", parent_task.task_id)
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message="factor run failed",
+            error=str(ex),
+        )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent")
+        raise
+
+    response = FactorRunResponse(
         factor_id=result.factor_id,
         factor_version=result.factor_version,
         dataset_version=result.dataset_version,
@@ -1137,6 +1773,64 @@ def run_formula_factor(request: FactorRunRequest) -> FactorRunResponse:
         cached=result.cached,
         report=result.report.model_dump(mode="json"),
     )
+    parent_done = tm.update(
+        parent_task.task_id,
+        status="done",
+        progress=100,
+        message="factor ready",
+        result=response.model_dump(mode="json"),
+        result_ref={
+            "factor_version": result.factor_version,
+            "open_path": f"/factors?factor_version={result.factor_version}",
+            "compare_path": "/factors",
+        },
+    )
+    _emit_task_state("task.done", trace_id, parent_done, role="parent")
+    _write_audit(
+        "factor.health_report.linked",
+        trace_id,
+        {
+            "parent_task_id": str(parent_task.task_id),
+            "factor_id": result.factor_id,
+            "factor_version": result.factor_version,
+            "dataset_version": result.dataset_version,
+            "factor_artifact_path": result.artifact_path,
+            "health_report_artifact_path": result.report.health_report_artifact_path,
+        },
+    )
+    return response
+
+
+@router.post("/factors/run/submit", response_model=TaskRecord)
+def submit_factor_run_task(request: FactorRunRequest) -> TaskRecord:
+    _resolve_dataset_version(request.dataset_version)
+    failure_conditions = normalize_failure_conditions(
+        request.failure_conditions,
+        default_applies_to="factor",
+    )
+    if not failure_conditions:
+        raise HTTPException(
+            status_code=400,
+            detail="failure_conditions is required and must contain at least one item",
+        )
+    rationale = (request.cost_sensitivity_rationale or "").strip()
+    if request.cost_sensitivity_level is None or not rationale:
+        raise HTTPException(
+            status_code=400,
+            detail="cost_sensitivity_level and cost_sensitivity_rationale are required",
+        )
+
+    request_token = uuid4().hex
+    submit_request = request.model_copy(update={"request_token": request_token}, deep=True)
+
+    def _worker() -> None:
+        try:
+            run_formula_factor(submit_request)
+        except Exception:
+            logger.exception("submit_factor_run_task worker failed")
+
+    Thread(target=_worker, daemon=True).start()
+    return _wait_task_by_request_token(task_type="factor.run", request_token=request_token)
 
 
 @router.post("/factor/multi_market_compare", response_model=FactorMultiMarketCompareResponse)
@@ -1156,46 +1850,143 @@ def compare_factor_multi_market(request: FactorMultiMarketCompareRequest) -> Fac
     specs = _resolve_factor_specs_for_compare(request)
     compare_id = f"fmmc_{uuid4().hex[:12]}"
     trace_id = uuid4()
+    session_id = str(request.session_id or "").strip()
+    request_token = str(request.request_token or "").strip()
+    tm = _task_manager()
+
+    total_variants = max(1, len(specs) * len(markets))
+    parent_task = tm.create(
+        task_type="factor.multi_market_compare",
+        message="queued",
+        status="queued",
+        meta={
+            "compare_id": compare_id,
+            "market_count": len(markets),
+            "variant_total": total_variants,
+            "session_id": session_id,
+            "request_token": request_token,
+        },
+    )
+    _emit_task_state("task.created", trace_id, parent_task, role="parent", compare_id=compare_id)
+    parent_running = tm.update(
+        parent_task.task_id,
+        status="running",
+        progress=5,
+        message=f"queued {total_variants} variants",
+    )
+    _emit_task_state(
+        "task.progress",
+        trace_id,
+        parent_running,
+        role="parent",
+        compare_id=compare_id,
+        variant_done=0,
+        variant_total=total_variants,
+    )
 
     per_market_metrics: list[FactorMarketMetricRow] = []
     per_market_decay_curves: list[FactorMarketDecayCurve] = []
+    child_task_map: dict[tuple[int, str], UUID] = {}
+    child_task_ids: list[str] = []
     dataset_registry = _dataset_registry()
     factor_engine = _factor_engine()
+    planned_specs: list[FactorSpec] = [_with_universe_override(raw_spec, request.universe) for raw_spec in specs]
 
-    for spec_idx, raw_spec in enumerate(specs):
-        spec = _with_universe_override(raw_spec, request.universe)
-        cost_level = spec.cost_sensitivity.level.value if spec.cost_sensitivity else "medium"
-        cost_multiplier = _cost_sensitivity_multiplier(cost_level)
-        for market_idx, market in enumerate(markets):
-            symbol = request.symbol_map.get(market) or _default_symbol_for_market(market)
-            dataset = MockDataFactory().generate(
-                MockDatasetConfig(
-                    dataset_id=f"{compare_id}_{spec_idx}_{market.lower()}",
-                    market=market,
-                    symbol=symbol,
-                    start_date=start_date,
-                    end_date=end_date,
-                    seed=request.seed + (spec_idx * 101) + market_idx,
+    variant_index = 0
+    for spec_idx, spec in enumerate(planned_specs):
+        for market in markets:
+            variant_index += 1
+            child = tm.create(
+                task_type="factor.multi_market_compare.variant",
+                message=f"queued: {market} / {spec.factor_version}",
+                parent_task_id=parent_task.task_id,
+                status="queued",
+                meta={
+                    "variant_index": variant_index,
+                    "variant_total": total_variants,
+                    "market": market,
+                    "factor_id": spec.factor_id,
+                    "factor_version": spec.factor_version,
+                    "compare_id": compare_id,
+                    "session_id": session_id,
+                    "request_token": request_token,
+                },
+            )
+            child_task_map[(spec_idx, market)] = child.task_id
+            child_task_ids.append(str(child.task_id))
+            _emit_task_state(
+                "task.created",
+                trace_id,
+                child,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                compare_id=compare_id,
+            )
+
+    completed_variants = 0
+    try:
+        for spec_idx, spec in enumerate(planned_specs):
+            cost_level = spec.cost_sensitivity.level.value if spec.cost_sensitivity else "medium"
+            cost_multiplier = _cost_sensitivity_multiplier(cost_level)
+            for market_idx, market in enumerate(markets):
+                child_task_id = child_task_map[(spec_idx, market)]
+                child_running = tm.update(
+                    child_task_id,
+                    status="running",
+                    progress=20,
+                    message=f"preparing dataset: {market} / {spec.factor_version}",
                 )
-            )
-            dataset_entry = dataset_registry.register(dataset)
-            result = factor_engine.run(
-                factor_spec=spec,
-                dataset_version=dataset_entry.dataset_version,
-                factor_version=spec.factor_version,
-                seed=request.seed + (spec_idx * 31) + market_idx,
-            )
-            report = result.report
-            decay_ratio, half_life_lag, _, _ = _decay_profile(report.decay_curve)
-            avg_spread_bps = _market_avg_spread_bps(dataset)
-            estimated_cost_pressure = round(
-                (avg_spread_bps / 10000.0) * max(0.0, float(report.turnover_proxy)) * cost_multiplier,
-                8,
-            )
-            oos_gap = round(float(report.in_sample_ic_mean) - float(report.out_sample_ic_mean), 6)
+                _emit_task_state(
+                    "task.progress",
+                    trace_id,
+                    child_running,
+                    role="child",
+                    parent_task_id=str(parent_task.task_id),
+                    compare_id=compare_id,
+                )
 
-            per_market_metrics.append(
-                FactorMarketMetricRow(
+                symbol = request.symbol_map.get(market) or _default_symbol_for_market(market)
+                dataset = MockDataFactory().generate(
+                    MockDatasetConfig(
+                        dataset_id=f"{compare_id}_{spec_idx}_{market.lower()}",
+                        market=market,
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        seed=request.seed + (spec_idx * 101) + market_idx,
+                    )
+                )
+                dataset_entry = dataset_registry.register(dataset)
+                child_running = tm.update(
+                    child_task_id,
+                    status="running",
+                    progress=60,
+                    message=f"running factor engine: {market} / {spec.factor_version}",
+                )
+                _emit_task_state(
+                    "task.progress",
+                    trace_id,
+                    child_running,
+                    role="child",
+                    parent_task_id=str(parent_task.task_id),
+                    compare_id=compare_id,
+                )
+                result = factor_engine.run(
+                    factor_spec=spec,
+                    dataset_version=dataset_entry.dataset_version,
+                    factor_version=spec.factor_version,
+                    seed=request.seed + (spec_idx * 31) + market_idx,
+                )
+                report = result.report
+                decay_ratio, half_life_lag, _, _ = _decay_profile(report.decay_curve)
+                avg_spread_bps = _market_avg_spread_bps(dataset)
+                estimated_cost_pressure = round(
+                    (avg_spread_bps / 10000.0) * max(0.0, float(report.turnover_proxy)) * cost_multiplier,
+                    8,
+                )
+                oos_gap = round(float(report.in_sample_ic_mean) - float(report.out_sample_ic_mean), 6)
+
+                metric_row = FactorMarketMetricRow(
                     market=market,
                     factor_id=result.factor_id,
                     factor_version=result.factor_version,
@@ -1213,24 +2004,94 @@ def compare_factor_multi_market(request: FactorMultiMarketCompareRequest) -> Fac
                     estimated_cost_pressure=estimated_cost_pressure,
                     cost_sensitivity_level=cost_level,
                 )
-            )
-            per_market_decay_curves.append(
-                FactorMarketDecayCurve(
-                    market=market,
-                    factor_id=result.factor_id,
-                    factor_version=result.factor_version,
-                    points=[
-                        {"lag": int(point.lag), "ic": float(point.ic)}
-                        for point in report.decay_curve
-                    ],
+                per_market_metrics.append(metric_row)
+                per_market_decay_curves.append(
+                    FactorMarketDecayCurve(
+                        market=market,
+                        factor_id=result.factor_id,
+                        factor_version=result.factor_version,
+                        points=[
+                            {"lag": int(point.lag), "ic": float(point.ic)}
+                            for point in report.decay_curve
+                        ],
+                    )
                 )
+                child_done = tm.update(
+                    child_task_id,
+                    status="done",
+                    progress=100,
+                    message=f"done: {market} / {spec.factor_version}",
+                    result=metric_row.model_dump(mode="json"),
+                    result_ref={
+                        "factor_version": result.factor_version,
+                        "open_path": f"/factors?factor_version={result.factor_version}",
+                    },
+                )
+                _emit_task_state(
+                    "task.done",
+                    trace_id,
+                    child_done,
+                    role="child",
+                    parent_task_id=str(parent_task.task_id),
+                    compare_id=compare_id,
+                )
+                completed_variants += 1
+                parent_progress = min(95, 5 + int((completed_variants / total_variants) * 88))
+                parent_running = tm.update(
+                    parent_task.task_id,
+                    status="running",
+                    progress=parent_progress,
+                    message=f"{completed_variants}/{total_variants} variants completed",
+                )
+                _emit_task_state(
+                    "task.progress",
+                    trace_id,
+                    parent_running,
+                    role="parent",
+                    compare_id=compare_id,
+                    variant_done=completed_variants,
+                    variant_total=total_variants,
+                )
+    except Exception as ex:
+        logger.exception("factor.multi_market_compare failed: parent_task_id=%s", parent_task.task_id)
+        parent_error = tm.update(
+            parent_task.task_id,
+            status="error",
+            progress=100,
+            message="factor multi-market compare failed",
+            error=str(ex),
+        )
+        _emit_task_state("task.error", trace_id, parent_error, role="parent", compare_id=compare_id)
+        for child_id in child_task_ids:
+            child_uuid = UUID(child_id)
+            child = tm.get(child_uuid)
+            if child is None or child.status == "done":
+                continue
+            child_error = tm.update(
+                child_uuid,
+                status="error",
+                progress=100,
+                message="cancelled due to parent failure",
+                error=str(ex),
             )
+            _emit_task_state(
+                "task.error",
+                trace_id,
+                child_error,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                compare_id=compare_id,
+            )
+        if isinstance(ex, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
 
     summary_insights = _build_factor_compare_insights(per_market_metrics)
     _write_audit(
         "workbench.factor.multi_market.compare",
         trace_id,
         {
+            "parent_task_id": str(parent_task.task_id),
             "compare_id": compare_id,
             "requested_metrics": requested_metrics,
             "row_count": len(per_market_metrics),
@@ -1243,18 +2104,76 @@ def compare_factor_multi_market(request: FactorMultiMarketCompareRequest) -> Fac
         "report.factor.multi_market.ready",
         trace_id,
         {
+            "parent_task_id": str(parent_task.task_id),
             "compare_id": compare_id,
             "row_count": len(per_market_metrics),
             "market_count": len(markets),
         },
+        session_id=session_id or "workbench",
     )
-    return FactorMultiMarketCompareResponse(
+
+    response = FactorMultiMarketCompareResponse(
         compare_id=compare_id,
         requested_metrics=requested_metrics,
         per_market_metrics=per_market_metrics,
         per_market_decay_curves=per_market_decay_curves,
         summary_insights=summary_insights,
+        parent_task_id=str(parent_task.task_id),
+        child_task_ids=child_task_ids,
     )
+    parent_done = tm.update(
+        parent_task.task_id,
+        status="done",
+        progress=100,
+        message=f"{completed_variants}/{total_variants} variants completed",
+        result=response.model_dump(mode="json"),
+        result_ref={
+            "report_id": compare_id,
+            "open_path": f"/factors?compare_id={compare_id}",
+            "compare_path": "/factors",
+        },
+        meta={
+            **(tm.get(parent_task.task_id).meta if tm.get(parent_task.task_id) else {}),
+            "child_task_ids": child_task_ids,
+        },
+    )
+    _emit_task_state(
+        "task.done",
+        trace_id,
+        parent_done,
+        role="parent",
+        compare_id=compare_id,
+        variant_done=completed_variants,
+        variant_total=total_variants,
+    )
+    return response
+
+
+@router.post("/factor/multi_market_compare/submit", response_model=TaskRecord)
+def submit_factor_multi_market_compare_task(request: FactorMultiMarketCompareRequest) -> TaskRecord:
+    markets = _normalize_markets(request.markets)
+    if len(markets) < 2:
+        raise HTTPException(status_code=400, detail="at least two valid markets are required")
+    try:
+        start_date = date.fromisoformat(request.start)
+        end_date = date.fromisoformat(request.end)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail="start/end must be YYYY-MM-DD") from ex
+    if start_date >= end_date:
+        raise HTTPException(status_code=400, detail="start must be earlier than end")
+    _resolve_factor_specs_for_compare(request)
+
+    request_token = uuid4().hex
+    submit_request = request.model_copy(update={"request_token": request_token}, deep=True)
+
+    def _worker() -> None:
+        try:
+            compare_factor_multi_market(submit_request)
+        except Exception:
+            logger.exception("submit_factor_multi_market_compare_task worker failed")
+
+    Thread(target=_worker, daemon=True).start()
+    return _wait_task_by_request_token(task_type="factor.multi_market_compare", request_token=request_token)
 
 
 @router.get("/runs", response_model=list[RunSummary])
@@ -1274,7 +2193,7 @@ def list_runs() -> list[RunSummary]:
                 dataset_version=entry.dataset_version,
                 strategy_id=entry.strategy_id,
                 strategy_version=entry.strategy_version,
-                market=str(req.get("market", "US")),
+                market=str(entry.market or req.get("market", "US")),
                 start=str(req.get("start", "")),
                 end=str(req.get("end", "")),
                 sharpe=float(metrics.get("sharpe")) if metrics.get("sharpe") is not None else None,

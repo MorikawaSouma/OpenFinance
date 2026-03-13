@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     approval_db_file: str = ".openfinance/registry/approvals.sqlite3"
     risk_events_db_file: str = ".openfinance/registry/risk_events.sqlite3"
     chat_session_store_file: str = ".openfinance/registry/chat_sessions.json"
+    task_registry_file: str = ".openfinance/registry/tasks.json"
+    default_market: str = "US"
     knowledge_corpus_dir: str = "resources/corpus"
     audit_log_file: str = ".openfinance/registry/audit.jsonl"
     trading_mode: str = "research"
@@ -39,6 +41,11 @@ class Settings(BaseSettings):
     zhipu_api_key: str = ""
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     llm_force_stub: bool = True
+    llm_require_remote: bool = False
+    llm_remote_retries: int = 1
+    agent_force_step_parse_error: bool = False
+    task_force_error: bool = False
+    pipeline_force_variant_error: bool = False
     credibility_seed: int = 42
     credibility_semantic_enabled: bool = True
     credibility_semantic_use_llm: bool = False

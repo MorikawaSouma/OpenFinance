@@ -108,7 +108,7 @@ def _report_header_from_entry(entry: RunRegistryEntry, missing: list[str]) -> Re
             dataset_version=entry.dataset_version,
             strategy_id=entry.strategy_id,
             strategy_version=entry.strategy_version,
-            market=str(req.get("market", "US")),
+            market=str(entry.market or req.get("market", "US")),
             start=str(req.get("start", "")),
             end=str(req.get("end", "")),
             factor_versions=list(req.get("factor_versions", [])) if isinstance(req.get("factor_versions"), list) else [],
@@ -124,7 +124,7 @@ def _report_header_from_entry(entry: RunRegistryEntry, missing: list[str]) -> Re
         dataset_version=report.dataset_version,
         strategy_id=entry.strategy_id,
         strategy_version=report.strategy_version,
-        market=str(entry.request.get("market", "US")),
+        market=str(getattr(report, "market", "") or entry.market or entry.request.get("market", "US")),
         start=str(entry.request.get("start", "")),
         end=str(entry.request.get("end", "")),
         factor_versions=[row.model_dump(mode="json") for row in report.factor_versions],
@@ -286,6 +286,7 @@ def restore_trace_context(trace_id: str, session_id: str | None = Query(default=
             plan_id=plan_id,
             report_id=row.run_id,
             dataset_version=row.dataset_version,
+            market=row.market,
             metrics=row.metrics,
         )
 
@@ -304,6 +305,7 @@ def restore_trace_context(trace_id: str, session_id: str | None = Query(default=
         "last_run_id": session_memory.get("last_run_id"),
         "last_report_id": session_memory.get("last_report_id"),
         "last_dataset_version": session_memory.get("last_dataset_version"),
+        "last_market": session_memory.get("last_market"),
         "runs_by_session": session_memory.get("runs_by_session", []),
         "restore_message": restore_text,
     }

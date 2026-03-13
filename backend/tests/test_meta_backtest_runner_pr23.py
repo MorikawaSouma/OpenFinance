@@ -18,7 +18,7 @@ def _wait_done(client: TestClient, task_id: str, timeout: float = 8.0) -> dict:
     start = time.time()
     while time.time() - start <= timeout:
         row = client.get(f"/workbench/tasks/{task_id}").json()
-        if row["status"] in {"done", "failed"}:
+        if row["status"] in {"done", "failed", "error"}:
             return row
         time.sleep(0.1)
     raise TimeoutError(task_id)
@@ -147,3 +147,63 @@ def test_robustness_route_generates_variant_table() -> None:
     assert len(payload["stress_metrics"]) >= 2
     assert payload["worst_case_summary"]["source_type"] in {"regime", "stress"}
     assert payload["worst_case_summary"]["scenario_id"] != ""
+
+
+def test_robustness_route_creates_parent_child_tasks_with_result_links() -> None:
+    client = TestClient(app)
+    ds_task = client.post(
+        "/workbench/datasets/generate",
+        json={
+            "dataset_id": "pr55_task_tree_dataset",
+            "market": "US",
+            "symbol": "AAPL",
+            "start": "2024-01-01",
+            "end": "2024-02-15",
+            "seed": 560,
+            "base_price": 100.0,
+        },
+    )
+    assert ds_task.status_code == 200
+    ds_done = _wait_done(client, ds_task.json()["task_id"])
+    assert ds_done["status"] == "done"
+    dataset_version = ds_done["result"]["dataset_version"]
+
+    resp = client.post(
+        "/workbench/reports/robustness/run",
+        json={
+            "dataset_version": dataset_version,
+            "strategy_id": "robustness_obs_test",
+            "strategy_version": "robust-obs-v1",
+            "market": "US",
+            "start": "2024-01-01",
+            "end": "2024-02-15",
+            "strategy_family": "trend",
+            "rebalance": "weekly",
+            "lookback_days": 20,
+            "signal_threshold": 0.0,
+            "commission_bps": 5.0,
+            "slippage_bps": 8.0,
+            "max_variants": 8,
+        },
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    parent_task_id = str(payload.get("parent_task_id") or "")
+    child_task_ids = payload.get("child_task_ids") or []
+    assert parent_task_id
+    assert len(child_task_ids) >= 6
+
+    tasks = client.get("/workbench/tasks").json()
+    parent = next((row for row in tasks if str(row.get("task_id")) == parent_task_id), None)
+    assert parent is not None
+    assert parent["status"] == "done"
+    assert int(parent.get("progress", 0)) == 100
+    assert str((parent.get("result_ref") or {}).get("open_path") or "").startswith("/reports")
+
+    children = [row for row in tasks if str(row.get("parent_task_id") or "") == parent_task_id]
+    assert len(children) >= 6
+    for row in children:
+        assert row["status"] == "done"
+        result_ref = row.get("result_ref") or {}
+        assert str(result_ref.get("run_id") or "")
+        assert str(result_ref.get("open_path") or "").startswith("/reports/")

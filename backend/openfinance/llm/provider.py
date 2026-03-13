@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,13 +34,36 @@ class ZhipuGLM47Provider(LLMProvider):
     model = settings.zhipu_model
 
     def complete(self, prompt: str, **kwargs: Any) -> LLMResponse:
-        if settings.llm_force_stub or not settings.zhipu_api_key:
+        if settings.llm_force_stub:
             return self._stub_complete(prompt, **kwargs)
-        try:
-            return self._remote_complete(prompt, **kwargs)
-        except Exception as ex:  # pragma: no cover
-            logger.warning("Zhipu remote call failed; fallback to stub: %s", ex)
+        if not settings.zhipu_api_key:
+            msg = "Zhipu API key is missing; cannot call remote model."
+            if settings.llm_require_remote:
+                raise RuntimeError(msg)
+            logger.warning("%s Falling back to stub.", msg)
             return self._stub_complete(prompt, **kwargs)
+
+        retries = max(0, int(settings.llm_remote_retries))
+        last_error: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self._remote_complete(prompt, **kwargs)
+            except Exception as ex:  # pragma: no cover
+                last_error = ex
+                if attempt < retries:
+                    # Keep retry window short to avoid slowing interactive chat.
+                    backoff = min(1.5, 0.25 * (2**attempt))
+                    time.sleep(backoff)
+                    continue
+                if settings.llm_require_remote:
+                    raise RuntimeError(f"Zhipu remote call failed after {retries + 1} attempt(s): {ex}") from ex
+                logger.warning("Zhipu remote call failed; fallback to stub: %s", ex)
+                return self._stub_complete(prompt, **kwargs)
+
+        if settings.llm_require_remote and last_error is not None:
+            raise RuntimeError(f"Zhipu remote call failed: {last_error}") from last_error
+        logger.warning("Zhipu remote call failed; fallback to stub without error detail.")
+        return self._stub_complete(prompt, **kwargs)
 
     def _stub_complete(self, prompt: str, **kwargs: Any) -> LLMResponse:
         max_tokens = int(kwargs.get("max_tokens", 256))

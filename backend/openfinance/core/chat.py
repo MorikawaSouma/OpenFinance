@@ -21,6 +21,7 @@ class ChatSession(BaseModel):
     last_plan_id: str | None = None
     last_report_id: str | None = None
     last_dataset_version: str | None = None
+    last_market: str | None = None
     runs_by_session: list[dict[str, Any]] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -92,6 +93,7 @@ class ChatStore:
         last_plan_id: str | None = None,
         last_report_id: str | None = None,
         last_dataset_version: str | None = None,
+        last_market: str | None = None,
     ) -> ChatSession:
         with self._lock:
             session = self._sessions.get(session_id) or ChatSession(session_id=session_id)
@@ -103,6 +105,8 @@ class ChatStore:
                 session.last_report_id = last_report_id
             if last_dataset_version is not None:
                 session.last_dataset_version = last_dataset_version
+            if last_market is not None:
+                session.last_market = str(last_market).strip().upper() or None
             if last_run_id:
                 exists = any(str(row.get("run_id")) == last_run_id for row in session.runs_by_session)
                 if not exists:
@@ -130,6 +134,7 @@ class ChatStore:
         plan_id: str | None = None,
         report_id: str | None = None,
         dataset_version: str | None = None,
+        market: str | None = None,
         metrics: dict[str, Any] | None = None,
     ) -> ChatSession:
         with self._lock:
@@ -138,11 +143,14 @@ class ChatStore:
             session.last_plan_id = plan_id if plan_id is not None else session.last_plan_id
             session.last_report_id = report_id if report_id is not None else session.last_report_id
             session.last_dataset_version = dataset_version if dataset_version is not None else session.last_dataset_version
+            if market is not None:
+                session.last_market = str(market).strip().upper() or session.last_market
             row = {
                 "run_id": run_id,
                 "plan_id": session.last_plan_id,
                 "report_id": session.last_report_id,
                 "dataset_version": session.last_dataset_version,
+                "market": session.last_market,
                 "metrics": dict(metrics or {}),
                 "created_at": datetime.now(UTC).isoformat(),
             }
@@ -171,6 +179,7 @@ class ChatStore:
                     "last_plan_id": None,
                     "last_report_id": None,
                     "last_dataset_version": None,
+                    "last_market": None,
                     "runs_by_session": [],
                 }
             return {
@@ -178,6 +187,7 @@ class ChatStore:
                 "last_plan_id": session.last_plan_id,
                 "last_report_id": session.last_report_id,
                 "last_dataset_version": session.last_dataset_version,
+                "last_market": session.last_market,
                 "runs_by_session": list(session.runs_by_session),
             }
 

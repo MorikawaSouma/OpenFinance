@@ -4,14 +4,14 @@ import { cn } from "@/lib/utils";
 
 export function Table(props: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="w-full overflow-x-auto rounded-lg border border-border/70 bg-card/60">
+    <div className="w-full overflow-x-auto rounded-xl border border-border/80 bg-card/72 shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
       <table {...props} className={cn("w-full text-sm", props.className)} />
     </div>
   );
 }
 
 export function THead(props: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead {...props} className={cn("text-left text-[11px] uppercase tracking-wide text-muted-foreground", props.className)} />;
+  return <thead {...props} className={cn("text-left text-[11px] uppercase tracking-[0.11em] text-muted-foreground", props.className)} />;
 }
 
 export function TBody(props: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -19,7 +19,7 @@ export function TBody(props: React.HTMLAttributes<HTMLTableSectionElement>) {
 }
 
 export function Tr(props: React.HTMLAttributes<HTMLTableRowElement>) {
-  return <tr {...props} className={cn("transition-colors hover:bg-muted/50", props.className)} />;
+  return <tr {...props} className={cn("transition-colors hover:bg-muted/40", props.className)} />;
 }
 
 export function Th(props: React.ThHTMLAttributes<HTMLTableCellElement>) {

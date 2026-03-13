@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -43,6 +43,20 @@ def test_mock_providers_generate_structured_items() -> None:
         assert row.timestamp.tzinfo is not None
 
 
+def test_mock_titles_do_not_echo_query_and_keep_diversity() -> None:
+    query = "缇庤偂鏈€杩戞€庝箞鏍?
+    news = MockNewsProvider().search(query, limit=6)
+    titles = [row.headline for row in news]
+    assert len(titles) == 6
+    assert all(query.lower() not in title.lower() for title in titles)
+    assert len(set(titles)) / len(titles) >= 0.6
+
+    query_en = "US equities outlook"
+    news_en = MockNewsProvider().search(query_en, limit=6)
+    titles_en = [row.headline for row in news_en]
+    assert all(query_en.lower() not in title.lower() for title in titles_en)
+
+
 def test_hybrid_retriever_mixes_local_and_external_sources() -> None:
     corpus_dir = Path(__file__).resolve().parents[1] / "resources" / "corpus"
     hybrid = HybridRetriever(local_retriever=LocalCorpusRetriever(corpus_dir=corpus_dir))
@@ -79,7 +93,7 @@ def test_orchestrator_can_cite_external_sources_offline() -> None:
         response = client.post(
             "/orchestrator/run",
             json={
-                "question": "高利率和流动性收紧下如何做风险预算？",
+                "question": "楂樺埄鐜囧拰娴佸姩鎬ф敹绱т笅濡備綍鍋氶闄╅绠楋紵",
                 "active_agents": ["Buffett", "Soros"],
                 "evidence_pack_id": pack["evidence_pack_id"],
                 "developer_mode": True,

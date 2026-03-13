@@ -2,7 +2,7 @@ import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from openfinance.data.contracts.dataset import GeneratedDataset, OHLCVBar
@@ -35,13 +35,49 @@ class MetaBacktestRunner:
     def __init__(self, runner: BacktestRunner) -> None:
         self.runner = runner
 
-    def run(self, request: BacktestRequest, config: MetaBacktestConfig | None = None) -> RobustnessReport:
+    def plan_variants(self, request: BacktestRequest, config: MetaBacktestConfig | None = None) -> list[dict[str, Any]]:
         cfg = config or MetaBacktestConfig()
-        plans = self._build_variant_plans(request=request, config=cfg)
+        return self._build_variant_plans(request=request, config=cfg)
+
+    def run(
+        self,
+        request: BacktestRequest,
+        config: MetaBacktestConfig | None = None,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> RobustnessReport:
+        cfg = config or MetaBacktestConfig()
+        plans = self.plan_variants(request=request, config=cfg)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "variants.planned",
+                    "total": len(plans),
+                    "plans": [
+                        {
+                            "variant_id": str(row["variant_id"]),
+                            "group": str(row["group"]),
+                            "scenario": str(row["scenario"]),
+                        }
+                        for row in plans
+                    ],
+                }
+            )
         variants: list[RobustnessVariant] = []
         table: list[dict[str, float | int | str]] = []
 
-        for plan in plans:
+        for idx, plan in enumerate(plans):
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "variant.start",
+                        "index": idx + 1,
+                        "total": len(plans),
+                        "variant_id": str(plan["variant_id"]),
+                        "group": str(plan["group"]),
+                        "scenario": str(plan["scenario"]),
+                    }
+                )
             run_request = BacktestRequest(
                 dataset_version=request.dataset_version,
                 strategy_id=request.strategy_id,
@@ -91,12 +127,48 @@ class MetaBacktestRunner:
                     "turnover": self._metric(metrics, "turnover"),
                 }
             )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "variant.done",
+                        "index": idx + 1,
+                        "total": len(plans),
+                        "variant_id": variant.variant_id,
+                        "group": variant.group,
+                        "scenario": variant.scenario,
+                        "run_id": variant.run_id,
+                        "metrics": {
+                            "sharpe": self._metric(metrics, "sharpe"),
+                            "max_drawdown": self._metric(metrics, "max_drawdown"),
+                            "total_return": self._metric(metrics, "total_return"),
+                            "cost_drag": self._metric(metrics, "cost_drag"),
+                        },
+                    }
+                )
 
         summary = self._build_summary(variants)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "variants.summary",
+                    "completed": len(variants),
+                    "total": len(plans),
+                    "summary": summary.model_dump(mode="json"),
+                }
+            )
         base_dataset = self._load_dataset(request.dataset_version)
+        if progress_callback is not None:
+            progress_callback({"phase": "regime.start"})
         regime_metrics = self._run_regime_slices(request=request, dataset=base_dataset, config=cfg)
+        if progress_callback is not None:
+            progress_callback({"phase": "regime.done", "count": len(regime_metrics)})
+            progress_callback({"phase": "stress.start"})
         stress_metrics = self._run_stress_scenarios(request=request, dataset=base_dataset, config=cfg)
+        if progress_callback is not None:
+            progress_callback({"phase": "stress.done", "count": len(stress_metrics)})
         worst_case = self._build_worst_case_summary(regime_metrics=regime_metrics, stress_metrics=stress_metrics)
+        if progress_callback is not None:
+            progress_callback({"phase": "finalize", "worst_case": worst_case.model_dump(mode="json")})
         return RobustnessReport(
             robustness_id=f"rob_{uuid4().hex[:12]}",
             dataset_version=request.dataset_version,

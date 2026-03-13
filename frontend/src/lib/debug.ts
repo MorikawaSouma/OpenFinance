@@ -56,14 +56,32 @@ const snapshot: DebugSnapshot = {
   lastUpdatedAt: null,
 };
 
+function cloneSnapshot(source: DebugSnapshot): DebugSnapshot {
+  return {
+    ...source,
+    componentMounts: { ...source.componentMounts },
+    componentUnmounts: { ...source.componentUnmounts },
+    renderCount: { ...source.renderCount },
+    avgRenderMs: { ...source.avgRenderMs },
+    stateUpdateCount: { ...source.stateUpdateCount },
+    sse: {
+      ...source.sse,
+      reconnectDelaysMs: [...source.sse.reconnectDelaysMs],
+    },
+  };
+}
+
+let snapshotCache = cloneSnapshot(snapshot);
+
 function nowIso() {
   return new Date().toISOString();
 }
 
 function publish() {
   snapshot.lastUpdatedAt = nowIso();
+  snapshotCache = cloneSnapshot(snapshot);
   if (typeof window !== "undefined") {
-    window.__OF_DEBUG__ = getSnapshot();
+    window.__OF_DEBUG__ = snapshotCache;
   }
   for (const listener of listeners) {
     listener();
@@ -83,6 +101,7 @@ function detectNavigationType() {
 }
 
 detectNavigationType();
+snapshotCache = cloneSnapshot(snapshot);
 
 export function recordRouteChange(pathname: string) {
   snapshot.routeChangeCount += 1;
@@ -180,18 +199,7 @@ function subscribe(listener: () => void) {
 }
 
 function getSnapshot(): DebugSnapshot {
-  return {
-    ...snapshot,
-    componentMounts: { ...snapshot.componentMounts },
-    componentUnmounts: { ...snapshot.componentUnmounts },
-    renderCount: { ...snapshot.renderCount },
-    avgRenderMs: { ...snapshot.avgRenderMs },
-    stateUpdateCount: { ...snapshot.stateUpdateCount },
-    sse: {
-      ...snapshot.sse,
-      reconnectDelaysMs: [...snapshot.sse.reconnectDelaysMs],
-    },
-  };
+  return snapshotCache;
 }
 
 export function useDebugSnapshot() {
