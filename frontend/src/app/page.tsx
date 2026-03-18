@@ -5,6 +5,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Database, PlayCircle } from "lucide-react";
 
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useRiskApprovalState } from "@/components/providers/risk-approval-provider";
 import { EmptyState } from "@/components/common/empty-state";
 import { useWorkbench } from "@/components/providers/workbench-provider";
 import { Badge } from "@/components/ui/badge";
@@ -13,12 +15,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DashboardPage() {
-  const { loadingCore, runs, risk, generateDataset, runBacktest, latestDatasetVersion, restoreTraceContext } = useWorkbench();
+  const { loadingCore, generateDataset, runBacktest, restoreTraceContext } = useWorkbench();
+  const { runs, datasets } = useCatalogSummaryState();
+  const { riskSnapshot: risk } = useRiskApprovalState();
   const router = useRouter();
   const [creatingDataset, setCreatingDataset] = useState(false);
   const [runningBacktest, setRunningBacktest] = useState(false);
   const [restoringRunId, setRestoringRunId] = useState<string | null>(null);
   const latestRun = runs[0];
+  const latestDatasetVersion = datasets[0]?.dataset_version ?? null;
 
   async function onGenerateDataset() {
     setCreatingDataset(true);

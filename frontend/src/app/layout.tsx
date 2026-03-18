@@ -3,7 +3,7 @@ import { IBM_Plex_Sans, Noto_Sans_SC, Source_Serif_4 } from "next/font/google";
 
 import { AppShell } from "@/components/layout/app-shell";
 import { ThemeProvider } from "@/components/providers/theme-provider";
-import { WorkbenchProvider } from "@/components/providers/workbench-provider";
+import { WorkbenchRootProvider } from "@/components/providers/workbench-root-provider";
 import "./globals.css";
 
 const ibmPlexSans = IBM_Plex_Sans({
@@ -34,9 +34,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body className={`${ibmPlexSans.variable} ${notoSansSc.variable} ${sourceSerif.variable}`}>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <WorkbenchProvider>
+          <WorkbenchRootProvider>
             <AppShell>{children}</AppShell>
-          </WorkbenchProvider>
+          </WorkbenchRootProvider>
         </ThemeProvider>
       </body>
     </html>

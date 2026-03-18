@@ -4,7 +4,10 @@ import { Activity, Menu, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useRiskApprovalState } from "@/components/providers/risk-approval-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
+import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { messages } from "@/lib/messages";
@@ -17,9 +20,15 @@ import {
 import { Switch } from "@/components/ui/switch";
 
 export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
-  const { mode, setMode, latestDatasetVersion, latestStrategyVersion, risk, activeTasksCount } = useWorkbench();
+  const { mode } = useWorkbenchShellState();
+  const { setMode } = useWorkbenchShellActions();
+  const { datasets, runs } = useCatalogSummaryState();
+  const { riskSnapshot } = useRiskApprovalState();
+  const { activeTasksCount } = useTaskRealtimeState();
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
+  const latestDatasetVersion = datasets[0]?.dataset_version ?? null;
+  const latestStrategyVersion = runs[0]?.strategy_version ?? null;
 
   useEffect(() => {
     setMounted(true);
@@ -38,8 +47,8 @@ export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
           <Badge variant="muted" className="hidden md:inline-flex">
             {messages.topbar.strategy}: {latestStrategyVersion ?? "-"}
           </Badge>
-          <Badge variant={risk?.live_trading_enabled ? "destructive" : "success"} className="hidden sm:inline-flex">
-            {messages.topbar.riskGate}: {risk?.live_trading_enabled ? messages.topbar.liveEnabled : messages.topbar.liveLocked}
+          <Badge variant={riskSnapshot?.live_trading_enabled ? "destructive" : "success"} className="hidden sm:inline-flex">
+            {messages.topbar.riskGate}: {riskSnapshot?.live_trading_enabled ? messages.topbar.liveEnabled : messages.topbar.liveLocked}
           </Badge>
           <Badge variant={activeTasksCount > 0 ? "warning" : "muted"}>
             <Activity className="mr-1 h-3 w-3" />

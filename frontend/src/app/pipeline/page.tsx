@@ -1,11 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { CheckCircle2, Circle, Download, Play } from "lucide-react";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import {
+  usePipelineWorkspaceActions,
+  usePipelineWorkspaceLegacyBridge,
+  usePipelineWorkspaceState,
+} from "@/components/providers/pipeline-workspace-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,28 +30,27 @@ const stepOrder = [
 ];
 
 export default function PipelinePage() {
-  const { mode, latestPipeline, runPipeline, pushToast, tasks, activeSessionId } = useWorkbench();
-  const [question, setQuestion] = useState(
-    "Why is Nikkei volatility rising recently? Build a low-drawdown, high-Sharpe strategy."
-  );
-  const [market, setMarket] = useState("JP");
-  const [highTurnoverMode, setHighTurnoverMode] = useState(false);
-  const [autoAdjustForRules, setAutoAdjustForRules] = useState(false);
-  const [confirmMigrationRisk, setConfirmMigrationRisk] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [pipelineTaskId, setPipelineTaskId] = useState("");
-  const [preflightWarnings, setPreflightWarnings] = useState<
-    Array<{
-      market: string;
-      severity: string;
-      title: string;
-      explanation: string;
-      suggestion?: string;
-      code: string;
-      variant_id?: string | null;
-    }>
-  >([]);
-  const sessionTaskScope = useMemo(() => (activeSessionId || "pipeline").trim(), [activeSessionId]);
+  const { mode, latestPipeline, runPipeline, pushToast, tasks, sessionTaskScope } = usePipelineWorkspaceLegacyBridge();
+  const {
+    question,
+    market,
+    highTurnoverMode,
+    autoAdjustForRules,
+    confirmMigrationRisk,
+    running,
+    pipelineTaskId,
+    preflightWarnings,
+  } = usePipelineWorkspaceState();
+  const {
+    setQuestion,
+    setMarket,
+    setHighTurnoverMode,
+    setAutoAdjustForRules,
+    setConfirmMigrationRisk,
+    setRunning,
+    setPipelineTaskId,
+    setPreflightWarnings,
+  } = usePipelineWorkspaceActions();
 
   const activePipelineTask = useMemo(() => {
     const byId = tasks.find((row) => String(row.task_id) === pipelineTaskId);

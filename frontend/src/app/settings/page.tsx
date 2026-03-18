@@ -3,6 +3,8 @@
 import { useTheme } from "next-themes";
 
 import { EmptyState } from "@/components/common/empty-state";
+import { useRiskApprovalActions, useRiskApprovalState } from "@/components/providers/risk-approval-provider";
+import { useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
 import { useWorkbench } from "@/components/providers/workbench-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,16 +14,10 @@ import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { API_BASE } from "@/lib/api";
 
 export default function SettingsPage() {
-  const {
-    mode,
-    loadingCore,
-    risk,
-    approvals,
-    requestApproval,
-    approveApproval,
-    enableApproval,
-    revokeApproval,
-  } = useWorkbench();
+  const { loadingCore } = useWorkbench();
+  const { mode } = useWorkbenchShellState();
+  const { riskSnapshot: risk, approvals } = useRiskApprovalState();
+  const { requestApproval, approveApproval, enableApproval, revokeApproval } = useRiskApprovalActions();
   const { resolvedTheme } = useTheme();
 
   if (loadingCore) {

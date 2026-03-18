@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/common/empty-state";
+import { useResearchContextState } from "@/components/providers/research-context-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
 import { useWorkbench } from "@/components/providers/workbench-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -83,7 +85,9 @@ function evidenceLink(task: TaskRecord) {
 }
 
 export default function TasksPage() {
-  const { loadingCore, coreError, refreshCore, tasks, activeSessionId } = useWorkbench();
+  const { loadingCore, coreError, refreshCore } = useWorkbench();
+  const { lastSessionId } = useResearchContextState();
+  const { tasks } = useTaskRealtimeState();
   const [focusTaskId, setFocusTaskId] = useState("");
 
   useEffect(() => {
@@ -93,7 +97,7 @@ export default function TasksPage() {
   }, []);
 
   const sessionScopedTasks = useMemo(() => {
-    const sid = String(activeSessionId ?? "").trim();
+    const sid = String(lastSessionId ?? "").trim();
     if (!sid) return tasks;
     const direct = tasks.filter((task) => String((task.meta ?? {}).session_id ?? "").trim() === sid);
     if (direct.length === 0) return tasks;
@@ -119,7 +123,7 @@ export default function TasksPage() {
       }
     }
     return tasks.filter((task) => selected.has(String(task.task_id)));
-  }, [activeSessionId, tasks]);
+  }, [lastSessionId, tasks]);
 
   const { parents, childrenByParent } = useMemo(() => {
     const map = new Map<string, TaskRecord>();

@@ -2,6 +2,7 @@
 
 import {
   createContext,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
@@ -11,7 +12,14 @@ import {
   type ReactNode,
 } from "react";
 
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useResearchContextActions } from "@/components/providers/research-context-provider";
+import { useRiskApprovalActions, useRiskApprovalState } from "@/components/providers/risk-approval-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
+import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
+import type { ToastItem } from "@/components/ui/toast";
 import { api } from "@/lib/api";
+import { executeChatSend } from "@/lib/chat-runtime";
 import { useChatSessionStore } from "@/lib/chat-session-store";
 import {
   recordBeforeUnload,
@@ -23,14 +31,15 @@ import {
   recordVisibilityChange,
 } from "@/lib/debug";
 import { subscribeEvents } from "@/lib/events";
+import { useCatalogSummaryStore } from "@/lib/catalog-summary-store";
 import { messages } from "@/lib/messages";
+import { useRiskApprovalStore } from "@/lib/risk-approval-store";
 import { isTaskTerminal, useTaskStore } from "@/lib/task-store";
+import { useWorkbenchChatStore } from "@/lib/workbench-chat-store";
 import { installDomMutationGuard } from "@/lib/dom-guard";
 import type {
   ApprovalRequest,
   ChatResponse,
-  ChatSessionSummary,
-  ChatTurn,
   DatasetEntry,
   Mode,
   PipelineResponse,
@@ -41,7 +50,6 @@ import type {
   StrategySummary,
   TaskRecord,
 } from "@/lib/types";
-import { ToastViewport, type ToastItem } from "@/components/ui/toast";
 
 type WorkbenchContextShape = {
   mode: Mode;
@@ -49,21 +57,15 @@ type WorkbenchContextShape = {
   loadingCore: boolean;
   refreshingCore: boolean;
   coreError: string | null;
-  tasks: TaskRecord[];
   datasets: DatasetEntry[];
   runs: RunSummary[];
   strategies: StrategySummary[];
   risk: RiskStatus | null;
   approvals: ApprovalRequest[];
-  events: SseEvent[];
-  sseConnectionState: "connecting" | "open" | "closed" | "error" | "reconnecting";
-  activeTasksCount: number;
   latestDatasetVersion: string | null;
   latestStrategyVersion: string | null;
   latestPipeline: PipelineResponse | null;
-  chatSessions: ChatSessionSummary[];
   activeSessionId: string | null;
-  chatTurns: ChatTurn[];
   refreshCore: () => Promise<void>;
   generateDataset: () => Promise<void>;
   runBacktest: () => Promise<void>;
@@ -78,7 +80,6 @@ type WorkbenchContextShape = {
     }
   ) => Promise<TaskRecord>;
   sendChat: (message: string) => Promise<ChatResponse>;
-  selectSession: (sessionId: string) => Promise<void>;
   pushToast: (title: string, description?: string, variant?: ToastItem["variant"]) => void;
   setKillSwitch: (enabled: boolean) => Promise<void>;
   setLiveUnlock: (enabled: boolean) => Promise<void>;
@@ -97,11 +98,13 @@ type WorkbenchContextShape = {
   revokeApproval: (requestId: string) => Promise<void>;
 };
 
-const WorkbenchContext = createContext<WorkbenchContextShape | null>(null);
+type WorkbenchChatActionsContextShape = {
+  selectSession: (sessionId: string) => Promise<void>;
+  syncActiveSession: (sessionId: string | null) => void;
+};
 
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
+const WorkbenchContext = createContext<WorkbenchContextShape | null>(null);
+const WorkbenchChatActionsContext = createContext<WorkbenchChatActionsContextShape | null>(null);
 
 function toObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -115,20 +118,13 @@ function taskTimestamp(task: TaskRecord): number {
   return 0;
 }
 
-function extractTaskIdsFromChatResponse(response: ChatResponse): string[] {
-  const debug = toObject(response.debug);
-  const direct = [
-    String(debug.task_id ?? "").trim(),
-    String(debug.parent_task_id ?? "").trim(),
-    String(debug.us_parent_task_id ?? "").trim(),
-    String(debug.jp_parent_task_id ?? "").trim(),
-  ].filter((row) => row.length > 0);
-
-  const childTaskIdsRaw = debug.child_task_ids;
-  const childTaskIds = Array.isArray(childTaskIdsRaw)
-    ? childTaskIdsRaw.map((row) => String(row ?? "").trim()).filter((row) => row.length > 0)
-    : [];
-  return Array.from(new Set([...direct, ...childTaskIds]));
+function extractPipelineResponse(task: TaskRecord): PipelineResponse | null {
+  if (String(task.task_type) !== "pipeline_run") return null;
+  if (String(task.status).toLowerCase() !== "done") return null;
+  const result = toObject(task.result);
+  const payload = toObject(result.pipeline_response);
+  if (Object.keys(payload).length === 0) return null;
+  return payload as unknown as PipelineResponse;
 }
 
 type RefreshOptions = {
@@ -136,73 +132,84 @@ type RefreshOptions = {
 };
 
 export function WorkbenchProvider({ children }: { children: ReactNode }) {
-  const [mode, setMode] = useState<Mode>("user");
-
+  // Compatibility bridge contract:
+  // - shell mode/toasts, catalog summaries, risk snapshot, approvals, and task selectors are read from dedicated domain stores.
+  // - global SSE/event handling, latest pipeline, restore/bootstrap behavior, and deprecated compatibility surfaces stay legacy-backed until later groups.
+  // - placeholder-only actions remain outside this bridge; this file must not regain primary ownership of the domain stores above.
+  const { mode } = useWorkbenchShellState();
+  const { setMode, pushToast } = useWorkbenchShellActions();
+  const { datasets, runs, strategies } = useCatalogSummaryState();
+  const { riskSnapshot: risk, approvals } = useRiskApprovalState();
+  const {
+    setKillSwitch: setKillSwitchAction,
+    setLiveUnlock: setLiveUnlockAction,
+    setPaperRunning: setPaperRunningAction,
+    requestApproval: requestApprovalAction,
+    approveApproval: approveApprovalAction,
+    enableApproval: enableApprovalAction,
+    revokeApproval: revokeApprovalAction,
+  } = useRiskApprovalActions();
+  const setCatalogOwnership = useCatalogSummaryStore((state) => state.markOwnership);
+  const setCatalogDatasets = useCatalogSummaryStore((state) => state.setDatasets);
+  const setCatalogRuns = useCatalogSummaryStore((state) => state.setRuns);
+  const setCatalogStrategies = useCatalogSummaryStore((state) => state.setStrategies);
+  const setRiskOwnership = useRiskApprovalStore((state) => state.markOwnership);
+  const setRiskSnapshot = useRiskApprovalStore((state) => state.setRiskSnapshot);
+  const replaceApprovals = useRiskApprovalStore((state) => state.replaceApprovals);
+  const upsertApproval = useRiskApprovalStore((state) => state.upsertApproval);
+  const { setLastSessionId, setRestoreContext } = useResearchContextActions();
   const [loadingCore, setLoadingCore] = useState(true);
   const [refreshingCore, setRefreshingCore] = useState(false);
   const [coreError, setCoreError] = useState<string | null>(null);
-  const [datasets, setDatasets] = useState<DatasetEntry[]>([]);
-  const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [strategies, setStrategies] = useState<StrategySummary[]>([]);
-  const [risk, setRisk] = useState<RiskStatus | null>(null);
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
-  const [events, setEvents] = useState<SseEvent[]>([]);
-  const [sseConnectionState, setSseConnectionState] = useState<
-    "connecting" | "open" | "closed" | "error" | "reconnecting"
-  >("connecting");
   const [latestPipeline, setLatestPipeline] = useState<PipelineResponse | null>(null);
 
-  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
-
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
   const upsertChatResponse = useChatSessionStore((state) => state.upsertFromResponse);
-  const hydrateSessionTurns = useChatSessionStore((state) => state.hydrateSessionTurns);
-  const tasksById = useTaskStore((state) => state.tasksById);
   const upsertTask = useTaskStore((state) => state.upsertTask);
   const replaceTasks = useTaskStore((state) => state.replaceTasks);
   const addActiveTask = useTaskStore((state) => state.addActiveTask);
   const syncTaskTerminalState = useTaskStore((state) => state.syncTaskTerminalState);
-  const tasks = useMemo(
-    () => Object.values(tasksById).sort((a, b) => taskTimestamp(b) - taskTimestamp(a)),
-    [tasksById]
-  );
-
-  useEffect(() => {
-    const pipelineTask = tasks.find((row) => {
-      if (String(row.task_type) !== "pipeline_run") return false;
-      if (String(row.status).toLowerCase() !== "done") return false;
-      const result = toObject(row.result);
-      return Object.keys(toObject(result.pipeline_response)).length > 0;
-    });
-    if (!pipelineTask) return;
-    const payload = toObject(toObject(pipelineTask.result).pipeline_response);
-    if (Object.keys(payload).length === 0) return;
-    try {
-      setLatestPipeline(payload as unknown as PipelineResponse);
-      recordStateUpdate("latestPipeline");
-    } catch {
-      // ignore malformed payload
-    }
-  }, [tasks]);
 
   const eventBufferRef = useRef<SseEvent[]>([]);
   const seenEventOrderRef = useRef<string[]>([]);
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const eventFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prependEvents = useWorkbenchChatStore((state) => state.prependEvents);
+  const setSseConnectionState = useWorkbenchChatStore((state) => state.setSseConnectionState);
 
-  const pushToast = useCallback((title: string, description?: string, variant?: ToastItem["variant"]) => {
-    const id = uid();
-    setToasts((prev) => [...prev, { id, title, description, variant }].slice(-4));
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((item) => item.id !== id));
-    }, 3500);
+  const syncActiveSession = useCallback(
+    (sessionId: string | null) => {
+      const nextSessionId = String(sessionId ?? "").trim();
+      setActiveSessionId(nextSessionId || null);
+      if (nextSessionId) {
+        setLastSessionId(nextSessionId);
+      }
+      recordStateUpdate("activeSessionId");
+    },
+    [setLastSessionId]
+  );
+
+  const syncLatestPipeline = useCallback((task: TaskRecord) => {
+    const payload = extractPipelineResponse(task);
+    if (!payload) return;
+    startTransition(() => {
+      setLatestPipeline(payload);
+    });
+    recordStateUpdate("latestPipeline");
   }, []);
 
-  const dismissToast = useCallback((id: string) => {
-    setToasts((prev) => prev.filter((item) => item.id !== id));
+  const syncLatestPipelineFromTasks = useCallback((rows: TaskRecord[]) => {
+    const ordered = rows.slice().sort((a, b) => taskTimestamp(b) - taskTimestamp(a));
+    for (const row of ordered) {
+      const payload = extractPipelineResponse(row);
+      if (!payload) continue;
+      startTransition(() => {
+        setLatestPipeline(payload);
+      });
+      recordStateUpdate("latestPipeline");
+      return;
+    }
   }, []);
 
   const upsertTaskFromEvent = useCallback((payload: Record<string, unknown>, eventSessionId?: string) => {
@@ -226,6 +233,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       error: source.error ? String(source.error) : null,
     };
     upsertTask(nextTask);
+    syncLatestPipeline(nextTask);
     const sessionId = String(eventSessionId ?? source.session_id ?? nextTask.meta?.session_id ?? "").trim();
     if (sessionId && !["workbench", "pipeline", "sse", "global"].includes(sessionId.toLowerCase())) {
       addActiveTask(sessionId, taskId);
@@ -234,18 +242,17 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       }
     }
     recordStateUpdate("tasks");
-  }, [addActiveTask, syncTaskTerminalState, upsertTask]);
+  }, [addActiveTask, syncLatestPipeline, syncTaskTerminalState, upsertTask]);
 
   const flushEventBuffer = useCallback(() => {
     if (eventBufferRef.current.length === 0) return;
     const pending = eventBufferRef.current;
     eventBufferRef.current = [];
-    setEvents((prev) => {
-      const next = [...pending.reverse(), ...prev].slice(0, 120);
-      return next;
+    startTransition(() => {
+      prependEvents([...pending].reverse());
     });
     recordStateUpdate("events");
-  }, []);
+  }, [prependEvents]);
 
   const enqueueEvent = useCallback(
     (event: SseEvent) => {
@@ -262,18 +269,27 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const refreshRiskApprovals = useCallback(async () => {
     try {
       const [riskRes, approvalsRes] = await Promise.all([api.getRiskStatus(), api.getApprovals()]);
-      setRisk(riskRes);
-      setApprovals(approvalsRes);
+      setRiskSnapshot(riskRes);
+      replaceApprovals(approvalsRes);
       recordStateUpdate("risk");
       recordStateUpdate("approvals");
     } catch {
       // keep silent for realtime refresh failures
     }
-  }, []);
+  }, [replaceApprovals, setRiskSnapshot]);
+
+  useEffect(() => {
+    setCatalogOwnership("legacy-workbench");
+    setRiskOwnership("legacy-workbench");
+  }, [setCatalogOwnership, setRiskOwnership]);
 
   useEffect(() => {
     installDomMutationGuard();
   }, []);
+
+  useEffect(() => {
+    recordStateUpdate("mode");
+  }, [mode]);
 
   const refreshCore = useCallback(
     async (options?: RefreshOptions) => {
@@ -305,11 +321,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
             syncTaskTerminalState(sessionId, row.task_id, row.status);
           }
         }
-        setDatasets(datasetsRes.slice().reverse());
-        setRuns(runsRes);
-        setStrategies(strategiesRes);
-        setRisk(riskRes);
-        setApprovals(approvalsRes);
+        syncLatestPipelineFromTasks(tasksRes);
+        setCatalogDatasets(datasetsRes.slice().reverse());
+        setCatalogRuns(runsRes);
+        setCatalogStrategies(strategiesRes);
+        setRiskSnapshot(riskRes);
+        replaceApprovals(approvalsRes);
         setCoreError(null);
         recordStateUpdate("tasks");
         recordStateUpdate("datasets");
@@ -333,7 +350,18 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [addActiveTask, pushToast, replaceTasks, syncTaskTerminalState]
+    [
+      addActiveTask,
+      pushToast,
+      replaceApprovals,
+      replaceTasks,
+      setCatalogDatasets,
+      setCatalogRuns,
+      setCatalogStrategies,
+      setRiskSnapshot,
+      syncLatestPipelineFromTasks,
+      syncTaskTerminalState,
+    ]
   );
 
   const scheduleCoreRefresh = useCallback(() => {
@@ -344,38 +372,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     }, 600);
   }, [refreshCore]);
 
-  const loadChatSessions = useCallback(async () => {
-    try {
-      const rows = await api.getChatSessions();
-      setChatSessions(rows);
-      recordStateUpdate("chatSessions");
-      if (!activeSessionId && rows.length > 0) {
-        setActiveSessionId(rows[0].session_id);
-        const turns = await api.getChatSessionTurns(rows[0].session_id);
-        hydrateSessionTurns(rows[0].session_id, turns);
-        setChatTurns(turns);
-        recordStateUpdate("activeSessionId");
-        recordStateUpdate("chatTurns");
-      }
-    } catch {
-      // keep silent in background
-    }
-  }, [activeSessionId, hydrateSessionTurns]);
-
   const selectSession = useCallback(async (sessionId: string) => {
-    setActiveSessionId(sessionId);
-    setChatTurns([]);
-    recordStateUpdate("activeSessionId");
-    recordStateUpdate("chatTurns");
-    const turns = await api.getChatSessionTurns(sessionId);
-    hydrateSessionTurns(sessionId, turns);
-    setChatTurns(turns);
-    recordStateUpdate("chatTurns");
-  }, [hydrateSessionTurns]);
+    syncActiveSession(sessionId);
+  }, [syncActiveSession]);
 
   useEffect(() => {
     void refreshCore();
-    void loadChatSessions();
 
     const timer = setInterval(() => {
       void refreshCore({ silent: true });
@@ -392,7 +394,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         eventFlushTimerRef.current = null;
       }
     };
-  }, [loadChatSessions, refreshCore]);
+  }, [refreshCore]);
 
   useEffect(() => {
     const onBeforeUnload = () => recordBeforeUnload();
@@ -430,15 +432,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
         if (["task.done", "task.error", "chat.done"].includes(ev.type)) {
           const eventSessionId = String(ev.session_id ?? "").trim();
-          if (eventSessionId && activeSessionId && eventSessionId === activeSessionId) {
-            void api.getChatSessionTurns(eventSessionId).then((turns) => {
-              hydrateSessionTurns(eventSessionId, turns);
-              setChatTurns(turns);
-              recordStateUpdate("chatTurns");
-            }).catch(() => undefined);
-          }
           if (eventSessionId && !["workbench", "pipeline", "sse", "global"].includes(eventSessionId.toLowerCase())) {
-            void loadChatSessions();
+            recordStateUpdate("chatSessions");
+            recordStateUpdate("chatTurns");
           }
         }
 
@@ -465,42 +461,38 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       onStatus: (status, detail) => {
         if (status === "open") {
           recordSseOpen();
-          setSseConnectionState("open");
+          startTransition(() => {
+            setSseConnectionState("open");
+          });
           void refreshCore({ silent: true });
           return;
         }
         if (status === "close") {
           recordSseClose();
-          setSseConnectionState("closed");
+          startTransition(() => {
+            setSseConnectionState("closed");
+          });
           return;
         }
         if (status === "error") {
           recordSseError();
-          setSseConnectionState("error");
+          startTransition(() => {
+            setSseConnectionState("error");
+          });
           return;
         }
         if (status === "reconnect") {
           recordSseReconnect(detail?.delayMs ?? 0);
-          setSseConnectionState("reconnecting");
+          startTransition(() => {
+            setSseConnectionState("reconnecting");
+          });
         }
       },
     });
     return () => {
       unsub();
     };
-  }, [activeSessionId, enqueueEvent, hydrateSessionTurns, loadChatSessions, pushToast, refreshCore, refreshRiskApprovals, scheduleCoreRefresh, upsertTaskFromEvent]);
-
-  useEffect(() => {
-    const savedMode = localStorage.getItem("of_mode");
-    if (savedMode === "developer" || savedMode === "user") {
-      setMode(savedMode);
-      recordStateUpdate("mode");
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem("of_mode", mode);
-  }, [mode]);
+  }, [activeSessionId, enqueueEvent, pushToast, refreshCore, refreshRiskApprovals, scheduleCoreRefresh, upsertTaskFromEvent]);
 
   useEffect(() => {
     const taskIds = useTaskStore.getState().listAllActiveTaskIds();
@@ -512,6 +504,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           const row = await api.getTask(taskId);
           if (cancelled) return;
           upsertTask(row);
+          syncLatestPipeline(row);
           const sessionId = String((toObject(row.meta).session_id ?? "")).trim();
           if (sessionId) {
             syncTaskTerminalState(sessionId, row.task_id, row.status);
@@ -525,7 +518,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [syncTaskTerminalState, upsertTask]);
+  }, [syncLatestPipeline, syncTaskTerminalState, upsertTask]);
 
   const pollTask = useCallback(
     async (taskId: string) => {
@@ -533,6 +526,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       while (!done) {
         const row = await api.getTask(taskId);
         upsertTask(row);
+        syncLatestPipeline(row);
         recordStateUpdate("tasks");
 
         done = row.status === "done" || row.status === "failed" || row.status === "error";
@@ -542,7 +536,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       }
       await refreshCore({ silent: true });
     },
-    [refreshCore, upsertTask]
+    [refreshCore, syncLatestPipeline, upsertTask]
   );
 
   const generateDataset = useCallback(async () => {
@@ -617,126 +611,35 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   const sendChat = useCallback(
     async (message: string) => {
-      const resp = await api.sendChat({
+      // Deprecated compatibility path: `/chat` now coordinates send execution from ChatWorkspaceProvider.
+      return executeChatSend({
         message,
-        session_id: activeSessionId,
-        include_debug: mode === "developer",
+        sessionIdForRequest: activeSessionId,
+        includeDebug: mode === "developer",
+        currentRiskSnapshot: risk,
+        syncActiveSession,
+        upsertChatResponse,
+        setRiskSnapshot,
+        upsertApproval,
+        prependEvents,
+        addActiveTask,
+        upsertTask,
+        syncTaskTerminalState,
       });
-      upsertChatResponse(resp);
-      const debug = toObject(resp.debug);
-      const debugReasoningSteps = debug.reasoning_steps;
-      if (Array.isArray(debugReasoningSteps)) {
-        for (let i = 0; i < debugReasoningSteps.length; i += 1) {
-          const step = toObject(debugReasoningSteps[i]);
-          const createdAt = String(step.created_at ?? new Date().toISOString());
-          enqueueEvent({
-            event_id: `chatresp:${resp.message_id}:reasoning:${i}`,
-            type: "reasoning.step.created",
-            trace_id: String(resp.trace_id ?? ""),
-            session_id: String(resp.session_id ?? ""),
-            timestamp: createdAt,
-            payload: {
-              step,
-              agent_name: String(step.agent_name ?? ""),
-              step_idx: Number(step.step_idx ?? i + 1),
-              step_type: String(step.step_type ?? "warning"),
-              title: String(step.title ?? ""),
-              summary: String(step.summary ?? ""),
-              evidence_refs: Array.isArray(step.evidence_refs) ? step.evidence_refs : [],
-              parse_error: String(step.parse_error ?? ""),
-              prompt_hash: String(step.prompt_hash ?? ""),
-            },
-          });
-        }
-        enqueueEvent({
-          event_id: `chatresp:${resp.message_id}:reasoning:final`,
-          type: "reasoning.trace.final",
-          trace_id: String(resp.trace_id ?? ""),
-          session_id: String(resp.session_id ?? ""),
-          timestamp: new Date().toISOString(),
-          payload: {
-            agent_name: "GeneralInfo",
-            steps_count: debugReasoningSteps.length,
-            steps: debugReasoningSteps,
-            has_parse_error: debugReasoningSteps.some((row) => Boolean(toObject(row).parse_error)),
-          },
-        });
-      }
-      const riskSnapshot = toObject(resp.risk_snapshot);
-      if (Object.keys(riskSnapshot).length > 0) {
-        setRisk((prev) => ({
-          ...(prev ?? {
-            mode: "paper",
-            kill_switch_enabled: false,
-            live_trading_enabled: false,
-            paper_trading_enabled: false,
-            risk_max_order_qty: 0,
-          }),
-          live_trading_enabled: Boolean(riskSnapshot.live_trading_enabled),
-          paper_trading_enabled: Boolean(riskSnapshot.paper_trading_enabled),
-          kill_switch_enabled: Boolean(riskSnapshot.kill_switch),
-          live_approval_state: String(riskSnapshot.live_lock_status ?? prev?.live_approval_state ?? "locked"),
-          current_drawdown: Number(riskSnapshot.drawdown ?? prev?.current_drawdown ?? 0),
-          current_volatility: Number(riskSnapshot.volatility ?? prev?.current_volatility ?? 0),
-          risk_status: String(riskSnapshot.risk_level ?? prev?.risk_status ?? "normal"),
-          max_account_drawdown_limit: Number(
-            toObject(riskSnapshot.limits).max_account_drawdown_limit ?? prev?.max_account_drawdown_limit ?? 0
-          ),
-          abnormal_volatility_limit: Number(
-            toObject(riskSnapshot.limits).abnormal_volatility_limit ?? prev?.abnormal_volatility_limit ?? 0
-          ),
-          risk_max_order_qty: Number(toObject(riskSnapshot.limits).risk_max_order_qty ?? prev?.risk_max_order_qty ?? 0),
-          updated_at: String(riskSnapshot.updated_at ?? ""),
-        }));
-        recordStateUpdate("risk");
-      }
-      const approvalsSnapshot = toObject(resp.approvals_snapshot);
-      const approvalsRaw = approvalsSnapshot.items;
-      if (Array.isArray(approvalsRaw)) {
-        const mapped: ApprovalRequest[] = approvalsRaw
-          .map((row) => toObject(row))
-          .map((row) => ({
-            request_id: String(row.request_id ?? ""),
-            target: String(row.target ?? ""),
-            action: "request_trade_enable",
-            status: String(row.status ?? "pending") as ApprovalRequest["status"],
-            context: {
-              use_case: String(row.use_case ?? ""),
-              plan_id: String(row.plan_id ?? ""),
-            },
-            created_at: String(row.created_at ?? ""),
-            updated_at: String(row.created_at ?? ""),
-            expires_at: null,
-            transitions: [],
-          }))
-          .filter((row) => row.request_id.length > 0);
-        if (mapped.length > 0) {
-          setApprovals((prev) => {
-            const keep = prev.filter((item) => !mapped.some((next) => next.request_id === item.request_id));
-            return [...mapped, ...keep].slice(0, 30);
-          });
-          recordStateUpdate("approvals");
-        }
-      }
-      setActiveSessionId(resp.session_id);
-      setChatTurns(resp.turns);
-      recordStateUpdate("activeSessionId");
-      recordStateUpdate("chatTurns");
-      const linkedTaskIds = extractTaskIdsFromChatResponse(resp);
-      for (const taskId of linkedTaskIds) {
-        addActiveTask(resp.session_id, taskId);
-        try {
-          const row = await api.getTask(taskId);
-          upsertTask(row);
-          syncTaskTerminalState(resp.session_id, taskId, row.status);
-        } catch {
-          // task may not be visible yet; realtime events will backfill
-        }
-      }
-      await loadChatSessions();
-      return resp;
     },
-    [activeSessionId, addActiveTask, loadChatSessions, mode, syncTaskTerminalState, upsertChatResponse, upsertTask]
+    [
+      activeSessionId,
+      addActiveTask,
+      mode,
+      risk,
+      prependEvents,
+      setRiskSnapshot,
+      syncActiveSession,
+      syncTaskTerminalState,
+      upsertChatResponse,
+      upsertApproval,
+      upsertTask,
+    ]
   );
 
   const restoreTraceContext = useCallback(
@@ -744,66 +647,31 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       const bundle = await api.restoreTrace(traceId, activeSessionId ?? undefined);
       const restoredSessionId = String(bundle.session_state?.session_id || "");
       if (restoredSessionId) {
-        setActiveSessionId(restoredSessionId);
-        recordStateUpdate("activeSessionId");
-        const turns = await api.getChatSessionTurns(restoredSessionId);
-        hydrateSessionTurns(restoredSessionId, turns);
-        setChatTurns(turns);
+        syncActiveSession(restoredSessionId);
+        setRestoreContext({
+          sessionId: restoredSessionId,
+          traceId,
+          restoredAt: new Date().toISOString(),
+        });
         recordStateUpdate("chatTurns");
       }
-      await loadChatSessions();
-      await refreshCore({ silent: true });
       pushToast("Context restored", bundle.summary, bundle.partial_restore ? "default" : "success");
       return bundle;
     },
-    [activeSessionId, hydrateSessionTurns, loadChatSessions, pushToast, refreshCore]
+    [activeSessionId, pushToast, setRestoreContext, syncActiveSession]
   );
 
-  const setKillSwitch = useCallback(
-    async (enabled: boolean) => {
-      try {
-        const status = await api.setKillSwitch(enabled);
-        setRisk(status);
-        recordStateUpdate("risk");
-        pushToast("Kill switch updated", enabled ? "Kill switch ON" : "Kill switch OFF", "success");
-      } catch (err) {
-        pushToast("Kill switch update failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast]
-  );
+  const setKillSwitch = useCallback(async (enabled: boolean) => {
+    await setKillSwitchAction(enabled);
+  }, [setKillSwitchAction]);
 
-  const setLiveUnlock = useCallback(
-    async (enabled: boolean) => {
-      try {
-        const status = await api.setLiveUnlock(enabled);
-        setRisk(status);
-        recordStateUpdate("risk");
-        pushToast(
-          "Live lock updated",
-          status.live_trading_enabled ? "Live trading is enabled." : "Live trading remains locked.",
-          status.live_trading_enabled ? "success" : "default"
-        );
-      } catch (err) {
-        pushToast("Live lock update failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast]
-  );
+  const setLiveUnlock = useCallback(async (enabled: boolean) => {
+    await setLiveUnlockAction(enabled);
+  }, [setLiveUnlockAction]);
 
-  const setPaperRunning = useCallback(
-    async (enabled: boolean) => {
-      try {
-        const status = await api.setPaperRunning(enabled);
-        setRisk(status);
-        recordStateUpdate("risk");
-        pushToast("Paper trading status updated", enabled ? "Paper trading started." : "Paper trading stopped.", "success");
-      } catch (err) {
-        pushToast("Paper trading update failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast]
-  );
+  const setPaperRunning = useCallback(async (enabled: boolean) => {
+    await setPaperRunningAction(enabled);
+  }, [setPaperRunningAction]);
 
   const requestApproval = useCallback(
     async (payload: {
@@ -814,63 +682,22 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       session_id?: string;
       risk_statement_ack?: boolean;
     }) => {
-      try {
-        const row = await api.requestApproval(payload);
-        setApprovals((prev) => [row, ...prev.filter((item) => item.request_id !== row.request_id)]);
-        recordStateUpdate("approvals");
-        await refreshCore({ silent: true });
-        pushToast("Approval request submitted", `${payload.target} status: ${row.status}`, "success");
-      } catch (err) {
-        pushToast("Approval request failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
+      await requestApprovalAction(payload);
     },
-    [pushToast, refreshCore]
+    [requestApprovalAction]
   );
 
-  const approveApproval = useCallback(
-    async (requestId: string) => {
-      try {
-        const row = await api.approveApproval(requestId);
-        setApprovals((prev) => [row, ...prev.filter((item) => item.request_id !== row.request_id)]);
-        recordStateUpdate("approvals");
-        await refreshCore({ silent: true });
-        pushToast("Approval updated", `${requestId} -> approved`, "success");
-      } catch (err) {
-        pushToast("Approve failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast, refreshCore]
-  );
+  const approveApproval = useCallback(async (requestId: string) => {
+    await approveApprovalAction(requestId);
+  }, [approveApprovalAction]);
 
-  const enableApproval = useCallback(
-    async (requestId: string) => {
-      try {
-        const row = await api.enableApproval(requestId);
-        setApprovals((prev) => [row, ...prev.filter((item) => item.request_id !== row.request_id)]);
-        recordStateUpdate("approvals");
-        await refreshCore({ silent: true });
-        pushToast("Approval updated", `${requestId} -> enabled`, "success");
-      } catch (err) {
-        pushToast("Enable failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast, refreshCore]
-  );
+  const enableApproval = useCallback(async (requestId: string) => {
+    await enableApprovalAction(requestId);
+  }, [enableApprovalAction]);
 
-  const revokeApproval = useCallback(
-    async (requestId: string) => {
-      try {
-        const row = await api.revokeApproval(requestId);
-        setApprovals((prev) => [row, ...prev.filter((item) => item.request_id !== row.request_id)]);
-        recordStateUpdate("approvals");
-        await refreshCore({ silent: true });
-        pushToast("Approval updated", `${requestId} -> revoked`, "success");
-      } catch (err) {
-        pushToast("Revoke failed", err instanceof Error ? err.message : messages.toast.unknownError, "error");
-      }
-    },
-    [pushToast, refreshCore]
-  );
+  const revokeApproval = useCallback(async (requestId: string) => {
+    await revokeApprovalAction(requestId);
+  }, [revokeApprovalAction]);
 
   const value = useMemo<WorkbenchContextShape>(
     () => ({
@@ -879,28 +706,21 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       loadingCore,
       refreshingCore,
       coreError,
-      tasks,
       datasets,
       runs,
       strategies,
       risk,
       approvals,
-      events,
-      sseConnectionState,
-      activeTasksCount: tasks.filter((item) => !isTaskTerminal(String(item.status ?? ""))).length,
       latestDatasetVersion: datasets[0]?.dataset_version ?? null,
       latestStrategyVersion: runs[0]?.strategy_version ?? null,
       latestPipeline,
-      chatSessions,
       activeSessionId,
-      chatTurns,
       refreshCore: async () => refreshCore(),
       generateDataset,
       runBacktest,
       runPipeline,
       sendChat,
       restoreTraceContext,
-      selectSession,
       pushToast,
       setKillSwitch,
       setLiveUnlock,
@@ -915,25 +735,19 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       loadingCore,
       refreshingCore,
       coreError,
-      tasks,
       datasets,
       runs,
       strategies,
       risk,
       approvals,
-      events,
-      sseConnectionState,
       latestPipeline,
-      chatSessions,
       activeSessionId,
-      chatTurns,
       refreshCore,
       generateDataset,
       runBacktest,
       runPipeline,
       sendChat,
       restoreTraceContext,
-      selectSession,
       pushToast,
       setKillSwitch,
       setLiveUnlock,
@@ -945,10 +759,17 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     ]
   );
 
+  const chatActions = useMemo<WorkbenchChatActionsContextShape>(
+    () => ({
+      selectSession,
+      syncActiveSession,
+    }),
+    [selectSession, syncActiveSession]
+  );
+
   return (
     <WorkbenchContext.Provider value={value}>
-      {children}
-      <ToastViewport items={toasts} onDismiss={dismissToast} />
+      <WorkbenchChatActionsContext.Provider value={chatActions}>{children}</WorkbenchChatActionsContext.Provider>
     </WorkbenchContext.Provider>
   );
 }
@@ -959,4 +780,24 @@ export function useWorkbench() {
     throw new Error("useWorkbench must be used within WorkbenchProvider");
   }
   return ctx;
+}
+
+export function useWorkbenchChat() {
+  const ctx = useContext(WorkbenchChatActionsContext);
+  if (!ctx) {
+    throw new Error("useWorkbenchChat must be used within WorkbenchProvider");
+  }
+  const events = useWorkbenchChatStore((state) => state.events);
+  const sseConnectionState = useWorkbenchChatStore((state) => state.sseConnectionState);
+  return {
+    events,
+    sseConnectionState,
+    selectSession: ctx.selectSession,
+    syncActiveSession: ctx.syncActiveSession,
+  };
+}
+
+export function useWorkbenchTasks() {
+  const { tasks, activeTasksCount } = useTaskRealtimeState();
+  return { tasks, activeTasksCount };
 }

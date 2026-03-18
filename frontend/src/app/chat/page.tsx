@@ -6,7 +6,14 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type Muta
 import { Code2, FileText } from "lucide-react";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import {
+  useChatWorkspaceActions,
+  useChatWorkspaceLegacyBridge,
+  useChatWorkspaceState,
+} from "@/components/providers/chat-workspace-provider";
+import { useRiskApprovalActions, useRiskApprovalState } from "@/components/providers/risk-approval-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
+import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,7 +22,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, Td, THead, Th, Tr } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { buildMessageId, useChatSessionStore, type StoredChatMessage } from "@/lib/chat-session-store";
+import { type StoredChatMessage } from "@/lib/chat-session-store";
 import {
   recordComponentMount,
   recordComponentUnmount,
@@ -24,12 +31,11 @@ import {
   useDebugSnapshot,
 } from "@/lib/debug";
 import { messages } from "@/lib/messages";
-import type { ChatResponse, ChatTurn, TaskRecord } from "@/lib/types";
+import type { ChatResponse, TaskRecord } from "@/lib/types";
 
 type EnrichedTurn = StoredChatMessage;
 
 const CHAT_BOTTOM_THRESHOLD_PX = 120;
-const EMPTY_STORED_TURNS: EnrichedTurn[] = [];
 const CARD_PRIORITY: Record<string, number> = {
   summary: 0,
   metrics: 1,
@@ -77,13 +83,6 @@ function normalizeCardItems(items: Array<Record<string, unknown> | string> | und
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function toFallbackTurns(turns: ChatTurn[]): EnrichedTurn[] {
-  return turns.map((turn) => ({
-    ...turn,
-    id: buildMessageId(turn),
-  }));
 }
 
 function cardFingerprint(card: ChatResponse["cards"][number]) {
@@ -653,49 +652,53 @@ export default function ChatPage() {
   useRenderMetric("SessionsList");
   useRenderMetric("TradingConsole");
 
+  const { mode } = useWorkbenchShellState();
+  const { pushToast } = useWorkbenchShellActions();
+  const { riskSnapshot: risk, approvals } = useRiskApprovalState();
   const {
-    mode,
-    chatSessions,
-    chatTurns,
-    activeSessionId,
-    selectSession,
-    sendChat,
-    events,
-    sseConnectionState,
-    loadingCore,
-    refreshingCore,
-    tasks,
-    pushToast,
-    risk,
-    approvals,
     setPaperRunning,
     requestApproval,
     approveApproval,
     enableApproval,
     revokeApproval,
-  } = useWorkbench();
-
-  const selectStoredTurns = useCallback(
-    (state: { sessions: Record<string, { turns: EnrichedTurn[] }> }) => {
-      if (!activeSessionId) return EMPTY_STORED_TURNS;
-      return state.sessions[activeSessionId]?.turns ?? EMPTY_STORED_TURNS;
-    },
-    [activeSessionId]
-  );
-  const storedTurns = useChatSessionStore(selectStoredTurns);
-
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const [pendingMessage, setPendingMessage] = useState("");
-  const [eventsOpen, setEventsOpen] = useState(false);
-  const [traceFilter, setTraceFilter] = useState<"all" | "agent" | "tool" | "artifact" | "audit">("all");
-  const [tracePanelTab, setTracePanelTab] = useState<"live_trace" | "reasoning_steps">("live_trace");
-  const [restoredTraceId, setRestoredTraceId] = useState("");
-  const [restoredSessionId, setRestoredSessionId] = useState("");
-  const [restoreBannerShown, setRestoreBannerShown] = useState(false);
-  const [unlockUseCase, setUnlockUseCase] = useState("");
-  const [unlockPlanId, setUnlockPlanId] = useState("");
-  const [unlockAck, setUnlockAck] = useState(false);
+  } = useRiskApprovalActions();
+  const { tasks } = useTaskRealtimeState();
+  const {
+    events,
+    sseConnectionState,
+  } = useChatWorkspaceLegacyBridge();
+  const {
+    activeSessionId,
+    chatSessions,
+    turns: workspaceTurns,
+    latestSession,
+    planOptions,
+    sessionsLoading,
+    chatRefreshing,
+    restoredTraceId,
+    input,
+    sending,
+    pendingMessage,
+    eventsOpen,
+    traceFilter,
+    tracePanelTab,
+    restoreBannerShown,
+    unlockUseCase,
+    unlockPlanId,
+    unlockAck,
+  } = useChatWorkspaceState();
+  const {
+    setInput,
+    setEventsOpen,
+    setTraceFilter,
+    setTracePanelTab,
+    setRestoreBannerShown,
+    setUnlockUseCase,
+    setUnlockPlanId,
+    setUnlockAck,
+    sendMessage,
+    selectSession,
+  } = useChatWorkspaceActions();
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const atBottomRef = useRef(true);
@@ -728,18 +731,14 @@ export default function ChatPage() {
   }, []);
 
   const turns = useMemo<EnrichedTurn[]>(
-    () => {
-      const rows = storedTurns.length > 0 ? [...storedTurns] : toFallbackTurns(chatTurns);
-      rows.sort((a, b) => {
-        const at = Date.parse(String(a.created_at || ""));
-        const bt = Date.parse(String(b.created_at || ""));
-        if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
-        if (a.role !== b.role) return a.role === "user" ? -1 : 1;
-        return String(a.id).localeCompare(String(b.id));
-      });
-      return rows;
-    },
-    [chatTurns, storedTurns]
+    () => [...workspaceTurns].sort((a, b) => {
+      const at = Date.parse(String(a.created_at || ""));
+      const bt = Date.parse(String(b.created_at || ""));
+      if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
+      if (a.role !== b.role) return a.role === "user" ? -1 : 1;
+      return String(a.id).localeCompare(String(b.id));
+    }),
+    [workspaceTurns]
   );
   const pendingAssistantTurn = useMemo<EnrichedTurn | null>(() => {
     if (!sending || !pendingMessage.trim()) return null;
@@ -806,10 +805,6 @@ export default function ChatPage() {
       return { key, turn };
     });
   }, [renderTurns]);
-  const latestSession = useMemo(
-    () => chatSessions.find((row) => row.session_id === activeSessionId) ?? chatSessions[0] ?? null,
-    [activeSessionId, chatSessions]
-  );
   const riskSnapshotTs = String(risk?.updated_at ?? "").trim();
   const taskById = useMemo(
     () => new Map(tasks.map((task) => [String(task.task_id), task])),
@@ -850,27 +845,6 @@ export default function ChatPage() {
     () => events.filter((ev) => String(ev.type || "").toLowerCase() === "reasoning.trace.final").slice(0, 32),
     [events]
   );
-
-  const planOptions = useMemo(() => {
-    const rows = new Set<string>();
-    for (const session of chatSessions) {
-      if (session.last_plan_id && session.last_plan_id.trim().length > 0) rows.add(session.last_plan_id);
-    }
-    return [...rows];
-  }, [chatSessions]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    setRestoredTraceId((params.get("restored_trace_id") || "").trim());
-    setRestoredSessionId((params.get("session_id") || "").trim());
-  }, []);
-
-  useEffect(() => {
-    if (!restoredSessionId) return;
-    if (activeSessionId === restoredSessionId) return;
-    void selectSession(restoredSessionId).catch(() => undefined);
-  }, [activeSessionId, restoredSessionId, selectSession]);
 
   useEffect(() => {
     if (!restoredTraceId || restoreBannerShown) return;
@@ -998,18 +972,12 @@ export default function ChatPage() {
   const dispatchMessage = useCallback(async (text: string) => {
     const message = text.trim();
     if (!message || sending) return;
-    setSending(true);
-    setPendingMessage(message);
     try {
-      await sendChat(message);
-      setInput("");
+      await sendMessage(message);
     } catch (err) {
       pushToast(messages.toast.chatFailed, err instanceof Error ? err.message : messages.toast.unknownError, "error");
-    } finally {
-      setSending(false);
-      setPendingMessage("");
     }
-  }, [pushToast, sendChat, sending]);
+  }, [pushToast, sendMessage, sending]);
 
   const handleCardAction = useCallback(
     (action: string, payload?: Record<string, unknown>) => {
@@ -1092,7 +1060,7 @@ export default function ChatPage() {
           <CardDescription>{messages.chat.sessionsDesc}</CardDescription>
         </CardHeader>
         <CardContent>
-          {loadingCore ? (
+          {sessionsLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 6 }).map((_, i) => (
                 <Skeleton key={i} className="h-10 w-full" />
@@ -1125,7 +1093,7 @@ export default function ChatPage() {
         <CardHeader className="flex-row items-center justify-between">
           <div>
             <CardTitle>{messages.chat.workspace}</CardTitle>
-            <CardDescription>{messages.chat.workspaceDesc}{refreshingCore ? " (background refresh...)" : ""}</CardDescription>
+            <CardDescription>{messages.chat.workspaceDesc}{chatRefreshing ? " (background refresh...)" : ""}</CardDescription>
           </div>
           <Badge variant={mode === "developer" ? "warning" : "success"}>{mode === "developer" ? messages.chat.developerMode : messages.chat.userMode}</Badge>
         </CardHeader>
