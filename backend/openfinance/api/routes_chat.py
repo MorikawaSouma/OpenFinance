@@ -34,10 +34,25 @@ from openfinance.data.registry import DatasetRegistry
 from openfinance.knowledge.evidence import EvidencePack
 from openfinance.knowledge.service import KnowledgeService, build_default_knowledge_service
 from openfinance.markets.plugins import build_market_rules_provider
+from openfinance.quant.backtest.evaluation_plan import backtest_evaluation_plan_payload, parse_backtest_evaluation_plan
 from openfinance.quant.backtest.migration import MigrationChecker, MigrationWarning
 from openfinance.quant.backtest.report import BacktestReport, BacktestRequest
 from openfinance.quant.backtest.run_registry import RunRegistry
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    StrategyRuntimeControlOptimizerDetails,
+    resolve_strategy_runtime_control_optimizer_details,
+)
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    StrategyRuntimeAttributionExecutionDetails,
+    resolve_strategy_runtime_attribution_execution_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    StrategyRuntimeControlActionDeepDetails,
+    resolve_strategy_runtime_control_action_deep_details,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import parse_strategy_compare_result_details
 from openfinance.research.pipeline import PipelineRequest, ResearchPipelineEngine
+from openfinance.research.strategy_decision import StrategyDecision, parse_strategy_decision, StrategyProposalSpec
 from openfinance.research.plan_registry import PlanRegistry
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -500,20 +515,22 @@ def _is_high_frequency_request(message: str) -> bool:
     return any(token in low or token in str(message or "") for token in tokens)
 
 
-def _draft_preflight_strategy_spec(*, message: str, market: str) -> dict[str, Any]:
+def _draft_preflight_strategy_spec(*, message: str, market: str) -> StrategyProposalSpec:
     high_frequency = _is_high_frequency_request(message)
     low = str(message or "").lower()
     auto_round_lot = not ("no round lot" in low or "disable lot round" in low or "禁用手数" in str(message or ""))
-    return {
-        "market": market,
-        "strategy_family": "intraday_high_freq" if high_frequency else "trend",
-        "rebalance": "daily" if high_frequency else "weekly",
-        "lookback_days": 3 if high_frequency else 20,
-        "max_position": 0.15,
-        "leverage_limit": 1.0,
-        "auto_round_lot": auto_round_lot,
-        "run_time_utc": "03:30" if market == "CN" else "14:00",
-    }
+    return StrategyProposalSpec(
+        strategy_family="intraday_high_freq" if high_frequency else "trend",
+        rebalance="daily" if high_frequency else "weekly",
+        lookback_days=3 if high_frequency else 20,
+        signal_threshold=0.0,
+        position_sizing="risk_budget",
+        risk_budget="vol_target_10pct",
+        max_position=0.15,
+        leverage_limit=1.0,
+        auto_round_lot=auto_round_lot,
+        run_time_utc="03:30" if market == "CN" else "14:00",
+    )
 
 
 def _chat_preflight_warnings(*, message: str, market: str) -> list[dict[str, str]]:
@@ -1708,7 +1725,12 @@ def _watch_multi_market_compare_completion(
         return
     if row.status == "done":
         result = row.result if isinstance(row.result, dict) else {}
-        diff_table = result.get("diff_table") if isinstance(result.get("diff_table"), list) else []
+        typed = parse_strategy_compare_result_details(result.get("result_details"))
+        diff_table = (
+            [item.model_dump(mode="json") for item in typed.diff_rows]
+            if typed is not None and typed.diff_rows
+            else (result.get("diff_table") if isinstance(result.get("diff_table"), list) else [])
+        )
         us_row = next(
             (item for item in diff_table if isinstance(item, dict) and str(item.get("market", "")).upper() == "US"),
             {},
@@ -1953,25 +1975,23 @@ def _expert_card_items(agent_outputs: list[dict]) -> list[str]:
     return out
 
 
-def _strategy_decision_card_items(strategy_decision: dict) -> list[str]:
-    selected = strategy_decision.get("selected") if isinstance(strategy_decision, dict) else {}
-    selected_name = str(selected.get("name") or "n/a")
-    selected_rationale = str(selected.get("rationale") or "").strip()
-    selected_tradeoff = str(selected.get("tradeoff_summary") or "").strip()
+def _strategy_decision_card_items(strategy_decision: StrategyDecision | dict[str, Any] | None) -> list[str]:
+    parsed = strategy_decision if isinstance(strategy_decision, StrategyDecision) else parse_strategy_decision(strategy_decision)
+    selected = parsed.selected if parsed else None
+    selected_name = str(selected.name if selected else "n/a")
+    selected_rationale = str(selected.rationale if selected else "").strip()
+    selected_tradeoff = str(selected.tradeoff_summary if selected else "").strip()
     items = [
         f"selected: {selected_name}",
         f"rationale: {selected_rationale or 'n/a'}",
         f"tradeoff: {selected_tradeoff or 'n/a'}",
     ]
-    candidates = strategy_decision.get("candidates") if isinstance(strategy_decision, dict) else []
-    if isinstance(candidates, list):
-        for row in candidates[:3]:
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("name") or "candidate")
-            cost_profile = str(row.get("cost_profile") or "n/a")
-            why_not = str(row.get("why_not_selected") or "n/a")
-            items.append(f"{name} | cost={cost_profile} | why_not_selected={why_not}")
+    candidates = parsed.candidates if parsed else []
+    for row in candidates[:3]:
+        name = str(row.name or "candidate")
+        cost_profile = str(row.cost_profile or "n/a")
+        why_not = str(row.why_not_selected or "n/a")
+        items.append(f"{name} | cost={cost_profile} | why_not_selected={why_not}")
     return items
 
 
@@ -2038,11 +2058,32 @@ def _metrics_diff(old_metrics: dict[str, object], new_metrics: dict[str, object]
 
 
 def _cost_diff(old_report: BacktestReport, new_report: BacktestReport) -> dict[str, float]:
-    keys = ["commission_sum", "slippage_sum", "total"]
+    def _details(report: BacktestReport) -> StrategyRuntimeAttributionExecutionDetails:
+        if report.attribution_execution_details is not None:
+            return report.attribution_execution_details
+        diagnostics = report.diagnostics if isinstance(report.diagnostics, dict) else {}
+        return resolve_strategy_runtime_attribution_execution_details(
+            detail_object="BacktestReport",
+            details=None,
+            cost_breakdown=report.cost_breakdown,
+            attribution=report.attribution,
+            diagnostics=diagnostics,
+            orders=report.orders,
+            trades=report.trades,
+            metrics=report.metrics,
+        )
+
+    key_map = {
+        "commission_sum": "commission_sum",
+        "slippage_sum": "slippage_sum",
+        "total": "total_cost",
+    }
     out: dict[str, float] = {}
-    for key in keys:
-        old_v = float((old_report.cost_breakdown or {}).get(key, 0.0))
-        new_v = float((new_report.cost_breakdown or {}).get(key, 0.0))
+    old_details = _details(old_report).cost_detail
+    new_details = _details(new_report).cost_detail
+    for key, field_name in key_map.items():
+        old_v = float(getattr(old_details, field_name) or 0.0)
+        new_v = float(getattr(new_details, field_name) or 0.0)
         out[f"{key}_old"] = round(old_v, 6)
         out[f"{key}_new"] = round(new_v, 6)
         out[f"{key}_delta"] = round(new_v - old_v, 6)
@@ -2051,6 +2092,17 @@ def _cost_diff(old_report: BacktestReport, new_report: BacktestReport) -> dict[s
 
 def _risk_action_diff(old_report: BacktestReport, new_report: BacktestReport) -> dict[str, object]:
     def _action_counts(report: BacktestReport) -> dict[str, int]:
+        if report.action_regime_details is not None:
+            counts: dict[str, int] = {}
+            for row in report.action_regime_details.risk_actions:
+                name = str(row.action or "unknown")
+                counts[name] = counts.get(name, 0) + 1
+            if counts:
+                return counts
+        if report.runtime_diagnostics is not None:
+            typed_counts = dict(report.runtime_diagnostics.action_counts.risk_actions_by_type)
+            if typed_counts:
+                return typed_counts
         actions = report.diagnostics.get("risk_actions", [])
         rows = actions if isinstance(actions, list) else []
         counts: dict[str, int] = {}
@@ -2077,6 +2129,113 @@ def _risk_action_diff(old_report: BacktestReport, new_report: BacktestReport) ->
     }
 
 
+def _control_optimizer_diff(old_report: BacktestReport, new_report: BacktestReport) -> dict[str, object]:
+    def _deep_details(report: BacktestReport) -> StrategyRuntimeControlActionDeepDetails | None:
+        if report.control_action_deep_details is not None:
+            return report.control_action_deep_details
+        diagnostics = report.diagnostics if isinstance(report.diagnostics, dict) else {}
+        has_raw = any(
+            [
+                isinstance(diagnostics.get("optimizer_diagnostics"), list),
+                isinstance(diagnostics.get("risk_contribution_ts"), list),
+                isinstance(diagnostics.get("budget_deviation"), dict),
+                isinstance((diagnostics.get("risk_management") or {}).get("circuit_breaker"), dict)
+                if isinstance(diagnostics.get("risk_management"), dict)
+                else False,
+            ]
+        )
+        if not has_raw:
+            return None
+        return resolve_strategy_runtime_control_action_deep_details(
+            detail_object="BacktestReport",
+            details=None,
+            diagnostics=diagnostics,
+        )
+
+    def _details(report: BacktestReport) -> StrategyRuntimeControlOptimizerDetails | None:
+        if report.control_optimizer_details is not None:
+            return report.control_optimizer_details
+        diagnostics = report.diagnostics if isinstance(report.diagnostics, dict) else {}
+        has_raw = any(
+            [
+                isinstance(diagnostics.get("rejected_orders"), list),
+                isinstance(diagnostics.get("optimizer_diagnostics"), list),
+                isinstance(diagnostics.get("risk_contribution_ts"), list),
+                isinstance(diagnostics.get("budget_deviation"), dict),
+                isinstance((diagnostics.get("risk_management") or {}).get("circuit_breaker"), dict)
+                if isinstance(diagnostics.get("risk_management"), dict)
+                else False,
+            ]
+        )
+        if not has_raw:
+            return None
+        return resolve_strategy_runtime_control_optimizer_details(
+            detail_object="BacktestReport",
+            details=report.diagnostics.get("control_optimizer_details"),
+            diagnostics=diagnostics,
+        )
+
+    def _snapshot(report: BacktestReport) -> dict[str, object]:
+        deep = _deep_details(report)
+        if deep is not None:
+            latest_gap_by_asset = deep.budget_breakdown.latest_gap_by_asset
+            latest_gap_asset = None
+            if latest_gap_by_asset:
+                latest_gap_asset = max(latest_gap_by_asset.keys(), key=lambda key: abs(float(latest_gap_by_asset[key])))
+            return {
+                "optimizer_step_count": len(deep.optimizer_steps),
+                "last_optimizer_method": (
+                    (deep.optimizer_steps[-1].method or deep.optimizer_steps[-1].optimizer)
+                    if deep.optimizer_steps
+                    else None
+                ),
+                "circuit_breaker_rule": deep.circuit_breaker_state.rule_type,
+                "circuit_breaker_interval_count": len(deep.circuit_breaker_state.intervals),
+                "latest_budget_deviation_l1": deep.budget_breakdown.latest_deviation_l1,
+                "peak_budget_deviation_l1": deep.budget_breakdown.peak_deviation_l1,
+                "risk_point_count": deep.risk_contribution_breakdown.point_count,
+                "latest_risk_gap_asset": latest_gap_asset,
+            }
+        details = _details(report)
+        if details is None:
+            diagnostics = report.runtime_diagnostics
+            budget_summary = diagnostics.budget_deviation if diagnostics is not None else None
+            return {
+                "rejected_order_count": diagnostics.action_counts.rejected_order_count if diagnostics is not None else 0,
+                "optimizer_diagnostic_count": diagnostics.action_counts.optimizer_diagnostic_count if diagnostics is not None else 0,
+                "circuit_breaker_interval_count": 0,
+                "budget_observations": budget_summary.observations if budget_summary is not None else 0,
+                "latest_budget_deviation_l1": budget_summary.max_l1 if budget_summary is not None else None,
+                "risk_point_count": 0,
+            }
+        return {
+            "rejected_order_count": len(details.rejected_orders),
+            "optimizer_diagnostic_count": len(details.optimizer_diagnostics),
+            "circuit_breaker_interval_count": len(details.circuit_breaker_intervals),
+            "budget_observations": details.budget_detail.observations,
+            "latest_budget_deviation_l1": details.budget_detail.latest_deviation_l1,
+            "risk_point_count": len(details.risk_contribution_points),
+            "latest_reject_reason": details.rejected_orders[-1].reason if details.rejected_orders else None,
+            "last_optimizer": details.optimizer_diagnostics[-1].optimizer if details.optimizer_diagnostics else None,
+        }
+
+    old_snapshot = _snapshot(old_report)
+    new_snapshot = _snapshot(new_report)
+    delta: dict[str, object] = {}
+    for key in sorted(set(old_snapshot.keys()) | set(new_snapshot.keys())):
+        old_value = old_snapshot.get(key)
+        new_value = new_snapshot.get(key)
+        if isinstance(old_value, (int, float)) and isinstance(new_value, (int, float)):
+            delta[key] = round(float(new_value) - float(old_value), 6)
+        elif old_value != new_value:
+            delta[key] = {"old": old_value, "new": new_value}
+    return {
+        "old": old_snapshot,
+        "new": new_snapshot,
+        "delta": delta,
+    }
+
+
 def _detect_compare_intent(message: str) -> bool:
     text = message.lower()
     triggers = [
@@ -2099,21 +2258,32 @@ def _safe_num(metrics: dict[str, object], key: str) -> float | None:
 
 
 def _attribution_diff(old_report: BacktestReport, new_report: BacktestReport) -> dict[str, object]:
-    old_attr = old_report.attribution or {}
-    new_attr = new_report.attribution or {}
-    old_instr = old_attr.get("instrument_pnl_contrib") if isinstance(old_attr, dict) else {}
-    new_instr = new_attr.get("instrument_pnl_contrib") if isinstance(new_attr, dict) else {}
-    old_sector = old_attr.get("sector_pnl_contrib") if isinstance(old_attr, dict) else {}
-    new_sector = new_attr.get("sector_pnl_contrib") if isinstance(new_attr, dict) else {}
+    def _details(report: BacktestReport) -> StrategyRuntimeAttributionExecutionDetails:
+        if report.attribution_execution_details is not None:
+            return report.attribution_execution_details
+        diagnostics = report.diagnostics if isinstance(report.diagnostics, dict) else {}
+        return resolve_strategy_runtime_attribution_execution_details(
+            detail_object="BacktestReport",
+            details=None,
+            cost_breakdown=report.cost_breakdown,
+            attribution=report.attribution,
+            diagnostics=diagnostics,
+            orders=report.orders,
+            trades=report.trades,
+            metrics=report.metrics,
+        )
 
-    def _delta_map(old_map: object, new_map: object) -> list[dict[str, object]]:
-        old_rows = old_map if isinstance(old_map, dict) else {}
-        new_rows = new_map if isinstance(new_map, dict) else {}
-        keys = sorted(set(old_rows.keys()) | set(new_rows.keys()))
+    def _delta_map(
+        old_rows: list[Any],
+        new_rows: list[Any],
+    ) -> list[dict[str, object]]:
+        old_map = {str(row.label): float(row.pnl) for row in old_rows if getattr(row, "label", None)}
+        new_map = {str(row.label): float(row.pnl) for row in new_rows if getattr(row, "label", None)}
+        keys = sorted(set(old_map.keys()) | set(new_map.keys()))
         out: list[dict[str, object]] = []
         for key in keys:
-            ov = old_rows.get(key, 0.0)
-            nv = new_rows.get(key, 0.0)
+            ov = old_map.get(key, 0.0)
+            nv = new_map.get(key, 0.0)
             if isinstance(ov, (int, float)) and isinstance(nv, (int, float)):
                 out.append(
                     {
@@ -2125,9 +2295,11 @@ def _attribution_diff(old_report: BacktestReport, new_report: BacktestReport) ->
                 )
         return sorted(out, key=lambda row: abs(float(row["delta"])), reverse=True)
 
+    old_details = _details(old_report).attribution_detail
+    new_details = _details(new_report).attribution_detail
     return {
-        "instrument_delta_top": _delta_map(old_instr, new_instr)[:5],
-        "sector_delta_top": _delta_map(old_sector, new_sector)[:5],
+        "instrument_delta_top": _delta_map(old_details.instrument_rows, new_details.instrument_rows)[:5],
+        "sector_delta_top": _delta_map(old_details.sector_rows, new_details.sector_rows)[:5],
     }
 
 
@@ -2156,7 +2328,26 @@ def _load_report_by_run(run_id: str) -> BacktestReport | None:
     report_path = Path(entry.report_path)
     if not report_path.exists():
         return None
-    return BacktestReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    report = BacktestReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    return report.model_copy(
+        update={
+            "attribution_execution_details": resolve_strategy_runtime_attribution_execution_details(
+                detail_object="BacktestReport",
+                details=report.attribution_execution_details,
+                cost_breakdown=report.cost_breakdown,
+                attribution=report.attribution,
+                diagnostics=report.diagnostics,
+                orders=report.orders,
+                trades=report.trades,
+                metrics=report.metrics,
+            ),
+            "control_action_deep_details": resolve_strategy_runtime_control_action_deep_details(
+                detail_object="BacktestReport",
+                details=report.control_action_deep_details,
+                diagnostics=report.diagnostics,
+            )
+        }
+    )
 
 
 def _run_session_compare(session_id: UUID, message: str) -> tuple[str, str, BacktestReport, BacktestReport] | None:
@@ -2182,7 +2373,9 @@ def _run_iterative_mutation(session_id: UUID, message: str) -> tuple[dict, Backt
     old_report_path = Path(entry.report_path)
     if not old_report_path.exists():
         return None
-    old_report = BacktestReport.model_validate_json(old_report_path.read_text(encoding="utf-8"))
+    old_report = _load_report_by_run(last_run_id)
+    if old_report is None:
+        return None
     base_request = BacktestRequest.model_validate(entry.request)
     _, ops = _detect_modify_intent(message)
 
@@ -2200,8 +2393,15 @@ def _run_iterative_mutation(session_id: UUID, message: str) -> tuple[dict, Backt
             "strategy_version": _mutated_strategy_version(base_request.strategy_version, ops),
             "cost_model": next_cost,
             "constraints": next_constraints,
-            "evaluation_plan": {
-                **dict(base_request.evaluation_plan),
+            "evaluation_plan": parse_backtest_evaluation_plan(
+                {
+                    **backtest_evaluation_plan_payload(base_request.evaluation_plan),
+                    "iteration_source_run_id": str(entry.run_id),
+                    "chat_modify_ops": ops,
+                }
+            )
+            or {
+                **backtest_evaluation_plan_payload(base_request.evaluation_plan),
                 "iteration_source_run_id": str(entry.run_id),
                 "chat_modify_ops": ops,
             },
@@ -2636,6 +2836,7 @@ def chat_message(request: ChatRequest) -> ChatResponse:
         metrics_diff = _metrics_diff(baseline_report.metrics, current_report.metrics)
         cost_diff = _cost_diff(baseline_report, current_report)
         risk_diff = _risk_action_diff(baseline_report, current_report)
+        control_optimizer_diff = _control_optimizer_diff(baseline_report, current_report)
         attribution_diff = _attribution_diff(baseline_report, current_report)
         narrative = _diff_narrative(
             language=response_language,
@@ -2700,6 +2901,7 @@ def chat_message(request: ChatRequest) -> ChatResponse:
                 "metrics_diff": metrics_diff,
                 "cost_diff": cost_diff,
                 "risk_action_diff": risk_diff,
+                "control_optimizer_diff": control_optimizer_diff,
                 "attribution_diff": attribution_diff,
             },
             "session_memory": _chat_store().get_last_memory(session.session_id),
@@ -2724,6 +2926,7 @@ def chat_message(request: ChatRequest) -> ChatResponse:
             diffs = _metrics_diff(old_report.metrics, new_report.metrics)
             cost_diff = _cost_diff(old_report, new_report)
             risk_diff = _risk_action_diff(old_report, new_report)
+            control_optimizer_diff = _control_optimizer_diff(old_report, new_report)
             narrative = _diff_narrative(
                 language=response_language,
                 old_report=old_report,
@@ -2789,6 +2992,7 @@ def chat_message(request: ChatRequest) -> ChatResponse:
                 "metrics_diff": diffs,
                 "cost_diff": cost_diff,
                 "risk_action_diff": risk_diff,
+                "control_optimizer_diff": control_optimizer_diff,
                 "session_memory": _chat_store().get_last_memory(session.session_id),
             }
             _audit_store().append(
@@ -2802,6 +3006,7 @@ def chat_message(request: ChatRequest) -> ChatResponse:
                         "ops": base_meta["ops"],
                         "cost_diff": cost_diff,
                         "risk_action_diff": risk_diff,
+                        "control_optimizer_diff": control_optimizer_diff,
                     },
                     created_at=datetime.now(UTC),
                 )

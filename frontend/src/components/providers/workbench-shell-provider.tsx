@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 
 import { ToastViewport } from "@/components/ui/toast";
 import { readLegacyModeFromStorage, useWorkbenchShellStore } from "@/lib/workbench-shell-store";
@@ -11,7 +11,7 @@ export function WorkbenchShellProvider({ children }: { children: ReactNode }) {
   const dismissToast = useWorkbenchShellStore((state) => state.dismissToast);
 
   useEffect(() => {
-    // Group 2A moves live mode + toast ownership into the shell store while chat/pipeline behavior stays legacy-backed.
+    // Shell ownership is now stable here: hydrate persisted mode once and host the live toast viewport.
     hydrateLegacyMode(readLegacyModeFromStorage());
   }, [hydrateLegacyMode]);
 
@@ -24,18 +24,33 @@ export function WorkbenchShellProvider({ children }: { children: ReactNode }) {
 }
 
 export function useWorkbenchShellState() {
-  return useWorkbenchShellStore((state) => ({
-    mode: state.mode,
-    toasts: state.toasts,
-    legacyModeHydrated: state.legacyModeHydrated,
-  }));
+  const mode = useWorkbenchShellStore((state) => state.mode);
+  const toasts = useWorkbenchShellStore((state) => state.toasts);
+  const legacyModeHydrated = useWorkbenchShellStore((state) => state.legacyModeHydrated);
+
+  return useMemo(
+    () => ({
+      mode,
+      toasts,
+      legacyModeHydrated,
+    }),
+    [legacyModeHydrated, mode, toasts]
+  );
 }
 
 export function useWorkbenchShellActions() {
-  return useWorkbenchShellStore((state) => ({
-    setMode: state.setMode,
-    pushToast: state.pushToast,
-    dismissToast: state.dismissToast,
-    clearToasts: state.clearToasts,
-  }));
+  const setMode = useWorkbenchShellStore((state) => state.setMode);
+  const pushToast = useWorkbenchShellStore((state) => state.pushToast);
+  const dismissToast = useWorkbenchShellStore((state) => state.dismissToast);
+  const clearToasts = useWorkbenchShellStore((state) => state.clearToasts);
+
+  return useMemo(
+    () => ({
+      setMode,
+      pushToast,
+      dismissToast,
+      clearToasts,
+    }),
+    [clearToasts, dismissToast, pushToast, setMode]
+  );
 }

@@ -1,3 +1,6 @@
+// Historical phase-1 planning snapshot only.
+// This file is not the current runtime truth after phase-2 ownership migration and WorkbenchProvider removal.
+// Keep it only as migration archaeology until a later cleanup deletes or replaces it with a current architecture note.
 export type RefreshOwner =
   | "legacy-workbench-provider"
   | "workbench-shell-provider"

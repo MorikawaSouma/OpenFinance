@@ -34,6 +34,7 @@ class ScoreBasedOptimizer(PortfolioOptimizer):
 
     def optimize(self, inp: OptimizerInput) -> OptimizerResult:
         gross_target = max(0.0, float(inp.gross_target))
+        allow_short = bool((inp.constraints or {}).get("allow_short", False))
         keys = [key for key in inp.scores.keys() if key]
         if not keys or gross_target <= 0:
             return OptimizerResult(weights={key: 0.0 for key in keys}, diagnostics={"tiers": {}, "gross_target": gross_target})
@@ -59,7 +60,7 @@ class ScoreBasedOptimizer(PortfolioOptimizer):
                     bucket = "bottom"
                     tier_mul = 0.3
             tiers[inst] = bucket
-            signed = 1.0 if score >= 0 else -1.0
+            signed = 1.0 if score >= 0 else (0.0 if not allow_short else -1.0)
             raw[inst] = signed * tier_mul * (abs(score) + 1e-9)
 
         denom = sum(abs(value) for value in raw.values())
@@ -78,6 +79,7 @@ class RiskParityOptimizer(PortfolioOptimizer):
 
     def optimize(self, inp: OptimizerInput) -> OptimizerResult:
         gross_target = max(0.0, float(inp.gross_target))
+        allow_short = bool((inp.constraints or {}).get("allow_short", False))
         keys = [key for key in inp.scores.keys() if key]
         if not keys or gross_target <= 0:
             return OptimizerResult(weights={key: 0.0 for key in keys}, diagnostics={"gross_target": gross_target})
@@ -86,7 +88,7 @@ class RiskParityOptimizer(PortfolioOptimizer):
         for inst in keys:
             score = float(inp.scores.get(inst, 0.0))
             vol = max(1e-6, abs(float(inp.volatilities.get(inst, 0.02))))
-            direction = 1.0 if score >= 0 else -1.0
+            direction = 1.0 if score >= 0 else (0.0 if not allow_short else -1.0)
             raw[inst] = direction * (1.0 / vol)
         denom = sum(abs(value) for value in raw.values())
         if denom <= 0:
@@ -207,9 +209,11 @@ class RiskBudgetOptimizerV2(PortfolioOptimizer):
                 mu = float(expected_returns.get(asset, scores.get(asset, 0.0)))
                 out.append(1.0 if mu >= 0 else -1.0)
             return out
-        agg = sum(float(scores.get(asset, 0.0)) for asset in assets)
-        sign = 1.0 if agg >= 0 else -1.0
-        return [sign for _ in assets]
+        out = []
+        for asset in assets:
+            mu = float(expected_returns.get(asset, scores.get(asset, 0.0)))
+            out.append(1.0 if mu >= 0 else 0.0)
+        return out
 
     def _mu_vector(self, assets: list[str], expected_returns: dict[str, float], scores: dict[str, float]) -> list[float]:
         vals = [float(expected_returns.get(asset, scores.get(asset, 0.0))) for asset in assets]

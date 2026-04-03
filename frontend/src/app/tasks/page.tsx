@@ -5,8 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/common/empty-state";
 import { useResearchContextState } from "@/components/providers/research-context-provider";
-import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useTaskRealtimeActions, useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -85,16 +84,25 @@ function evidenceLink(task: TaskRecord) {
 }
 
 export default function TasksPage() {
-  const { loadingCore, coreError, refreshCore } = useWorkbench();
   const { lastSessionId } = useResearchContextState();
-  const { tasks } = useTaskRealtimeState();
+  const { tasks, hasTaskListLoaded, isTaskListBootstrapPending, taskListRefreshing, taskListError } = useTaskRealtimeState();
+  const { refreshTasks } = useTaskRealtimeActions();
   const [focusTaskId, setFocusTaskId] = useState("");
+
+  useEffect(() => {
+    void refreshTasks().catch(() => undefined);
+  }, [refreshTasks]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const value = String(new URLSearchParams(window.location.search).get("focus_task_id") ?? "").trim();
     setFocusTaskId(value);
   }, []);
+
+  useEffect(() => {
+    if (hasTaskListLoaded || taskListRefreshing || taskListError) return;
+    void refreshTasks().catch(() => undefined);
+  }, [hasTaskListLoaded, refreshTasks, taskListError, taskListRefreshing]);
 
   const sessionScopedTasks = useMemo(() => {
     const sid = String(lastSessionId ?? "").trim();
@@ -156,18 +164,24 @@ export default function TasksPage() {
         <CardTitle>Tasks</CardTitle>
       </CardHeader>
       <CardContent>
-        {loadingCore ? (
+        {isTaskListBootstrapPending ? (
           <div className="space-y-2">
             {Array.from({ length: 8 }).map((_, i) => (
               <Skeleton key={i} className="h-12 w-full" />
             ))}
           </div>
-        ) : coreError && sessionScopedTasks.length === 0 ? (
+        ) : taskListError && sessionScopedTasks.length === 0 ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
             <p className="text-sm font-semibold text-destructive">Failed to load tasks</p>
-            <p className="mt-1 text-xs text-muted-foreground">{coreError}</p>
-            <Button className="mt-3" size="sm" variant="outline" onClick={() => void refreshCore()}>
-              Retry
+            <p className="mt-1 text-xs text-muted-foreground">{taskListError}</p>
+            <Button
+              className="mt-3"
+              size="sm"
+              variant="outline"
+              disabled={taskListRefreshing}
+              onClick={() => void refreshTasks().catch(() => undefined)}
+            >
+              {taskListRefreshing ? "Retrying..." : "Retry"}
             </Button>
           </div>
         ) : sessionScopedTasks.length === 0 ? (

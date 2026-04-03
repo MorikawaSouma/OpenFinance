@@ -91,6 +91,37 @@ def test_meta_backtest_runner_generates_robustness_report(tmp_path: Path) -> Non
     )
     assert report.worst_case_summary.source_type in {"regime", "stress"}
     assert report.worst_case_summary.scenario_id != ""
+    assert report.base_strategy_spec.schema_version == "strategy_spec.v1"
+    assert report.base_strategy_validation.schema_version == "strategy_validation.v1"
+    assert report.base_strategy_validation.compile_ready is True
+    assert report.base_strategy_compilation.schema_version == "strategy_compilation.v1"
+    assert report.base_strategy_compilation.compilation_profile.schema_version == "strategy_compilation_profile.v1"
+    assert report.base_strategy_compilation.compilation_policy is not None
+    assert report.base_strategy_compilation.compilation_policy.schema_version == "strategy_compilation_policy.v1"
+    assert report.base_backtest_request.execution_model == "next_open"
+    assert report.base_backtest_request.evaluation_plan.schema_version == "backtest_evaluation_plan.v1"
+    assert report.base_backtest_request.evaluation_plan.request_input_profile is not None
+    assert report.base_backtest_request.evaluation_plan.request_input_profile.schema_version == "strategy_backtest_request_input_profile.v1"
+    assert report.analysis_config.max_variants == 8
+    assert report.outcome_summary is not None
+    assert report.outcome_summary.schema_version == "strategy_robustness_outcome_summary.v1"
+    assert report.outcome_summary.variant_count == report.summary.variant_count
+    assert report.outcome_summary.base_runtime_summary is not None
+    assert report.result_details is not None
+    assert report.result_details.schema_version == "strategy_robustness_result_details.v1"
+    assert len(report.result_details.variant_rows) == report.summary.variant_count
+    assert report.variants[0].action_regime_details is not None
+    assert report.variants[0].action_regime_details.schema_version == "strategy_runtime_action_regime.v1"
+    assert report.variants[0].action_regime_details.detail_object == "RobustnessVariant"
+    assert report.variants[0].attribution_execution_details is not None
+    assert report.variants[0].attribution_execution_details.schema_version == "strategy_runtime_attribution_execution.v1"
+    assert report.variants[0].attribution_execution_details.detail_object == "RobustnessVariant"
+    assert report.variants[0].control_optimizer_details is not None
+    assert report.variants[0].control_optimizer_details.schema_version == "strategy_runtime_control_optimizer.v1"
+    assert report.variants[0].control_optimizer_details.detail_object == "RobustnessVariant"
+    assert report.variants[0].control_action_deep_details is not None
+    assert report.variants[0].control_action_deep_details.schema_version == "strategy_runtime_control_action_deep.v1"
+    assert report.variants[0].control_action_deep_details.detail_object == "RobustnessVariant"
 
 
 def test_robustness_route_generates_variant_table() -> None:
@@ -147,6 +178,40 @@ def test_robustness_route_generates_variant_table() -> None:
     assert len(payload["stress_metrics"]) >= 2
     assert payload["worst_case_summary"]["source_type"] in {"regime", "stress"}
     assert payload["worst_case_summary"]["scenario_id"] != ""
+    assert payload["base_strategy_spec"]["schema_version"] == "strategy_spec.v1"
+    assert payload["base_strategy_validation"]["schema_version"] == "strategy_validation.v1"
+    assert payload["base_strategy_validation"]["compile_ready"] is True
+    assert payload["base_strategy_compilation"]["schema_version"] == "strategy_compilation.v1"
+    assert payload["base_strategy_compilation"]["compilation_profile"]["schema_version"] == "strategy_compilation_profile.v1"
+    assert payload["base_strategy_compilation"]["compilation_policy"]["schema_version"] == "strategy_compilation_policy.v1"
+    assert payload["base_backtest_request"]["execution_model"] == "next_open"
+    assert payload["base_backtest_request"]["evaluation_plan"]["schema_version"] == "backtest_evaluation_plan.v1"
+    assert payload["base_backtest_request"]["evaluation_plan"]["request_input_profile"]["schema_version"] == "strategy_backtest_request_input_profile.v1"
+    assert payload["analysis_config"]["max_variants"] == 7
+    assert payload["outcome_summary"]["schema_version"] == "strategy_robustness_outcome_summary.v1"
+    assert payload["outcome_summary"]["variant_count"] == payload["summary"]["variant_count"]
+    assert payload["outcome_summary"]["base_runtime_summary"]["schema_version"] == "strategy_runtime_outcome_summary.v1"
+    assert payload["result_details"]["schema_version"] == "strategy_robustness_result_details.v1"
+    assert len(payload["result_details"]["variant_rows"]) == payload["summary"]["variant_count"]
+    assert payload["variants"][0]["action_regime_details"]["schema_version"] == "strategy_runtime_action_regime.v1"
+    assert payload["variants"][0]["action_regime_details"]["detail_object"] == "RobustnessVariant"
+    assert payload["variants"][0]["attribution_execution_details"]["schema_version"] == "strategy_runtime_attribution_execution.v1"
+    assert payload["variants"][0]["attribution_execution_details"]["detail_object"] == "RobustnessVariant"
+    assert payload["variants"][0]["control_optimizer_details"]["schema_version"] == "strategy_runtime_control_optimizer.v1"
+    assert payload["variants"][0]["control_optimizer_details"]["detail_object"] == "RobustnessVariant"
+    assert payload["variants"][0]["control_action_deep_details"]["schema_version"] == "strategy_runtime_control_action_deep.v1"
+    assert payload["variants"][0]["control_action_deep_details"]["detail_object"] == "RobustnessVariant"
+    first_variant_run = str(payload["variants"][0]["run_id"])
+    first_report = client.get(f"/workbench/runs/{first_variant_run}")
+    assert first_report.status_code == 200
+    assert first_report.json()["strategy_validation"]["schema_version"] == "strategy_validation.v1"
+    assert first_report.json()["strategy_compilation"]["schema_version"] == "strategy_compilation.v1"
+    assert first_report.json()["strategy_compilation"]["compilation_profile"]["schema_version"] == "strategy_compilation_profile.v1"
+    assert first_report.json()["strategy_compilation"]["compilation_policy"]["schema_version"] == "strategy_compilation_policy.v1"
+    assert first_report.json()["action_regime_details"]["schema_version"] == "strategy_runtime_action_regime.v1"
+    assert first_report.json()["attribution_execution_details"]["schema_version"] == "strategy_runtime_attribution_execution.v1"
+    assert first_report.json()["control_optimizer_details"]["schema_version"] == "strategy_runtime_control_optimizer.v1"
+    assert first_report.json()["control_action_deep_details"]["schema_version"] == "strategy_runtime_control_action_deep.v1"
 
 
 def test_robustness_route_creates_parent_child_tasks_with_result_links() -> None:
@@ -207,3 +272,7 @@ def test_robustness_route_creates_parent_child_tasks_with_result_links() -> None
         result_ref = row.get("result_ref") or {}
         assert str(result_ref.get("run_id") or "")
         assert str(result_ref.get("open_path") or "").startswith("/reports/")
+        assert ((row.get("result") or {}).get("action_regime_details") or {}).get("schema_version") == "strategy_runtime_action_regime.v1"
+        assert ((row.get("result") or {}).get("attribution_execution_details") or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1"
+        assert ((row.get("result") or {}).get("control_optimizer_details") or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1"
+        assert ((row.get("result") or {}).get("control_action_deep_details") or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1"

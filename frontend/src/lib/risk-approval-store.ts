@@ -16,7 +16,7 @@ function mergeApprovalOrder(current: string[], incoming: string[]): string[] {
   return order;
 }
 
-export type RiskApprovalOwnership = "placeholder" | "legacy-workbench";
+export type RiskApprovalOwnership = "placeholder" | "risk-approval-provider";
 
 type RiskApprovalStoreState = {
   ownership: RiskApprovalOwnership;

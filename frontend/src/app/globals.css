@@ -231,11 +231,11 @@
 
   .nav-pill {
     border-radius: 0.9rem;
-    transition: transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+    transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
   }
 
   .nav-pill:hover {
-    transform: translateX(2px);
+    transform: none;
   }
 
   .elevate-hover {

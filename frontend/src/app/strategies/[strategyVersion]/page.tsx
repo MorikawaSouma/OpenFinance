@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useWorkbenchShellActions } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,7 +16,7 @@ import type { StrategyDetail } from "@/lib/types";
 export default function StrategyDetailPage() {
   const params = useParams<{ strategyVersion: string }>();
   const strategyVersion = String(params.strategyVersion ?? "");
-  const { pushToast } = useWorkbench();
+  const { pushToast } = useWorkbenchShellActions();
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
 
@@ -62,7 +62,7 @@ export default function StrategyDetailPage() {
         <CardHeader>
           <div>
             <CardTitle>Strategy Detail</CardTitle>
-            <CardDescription>{detail.strategy_version}</CardDescription>
+            <CardDescription>{detail.spec.strategy_version}</CardDescription>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => void load()}>
@@ -74,29 +74,47 @@ export default function StrategyDetailPage() {
           </div>
         </CardHeader>
         <CardContent className="grid gap-2 text-sm md:grid-cols-2">
-          <p>strategy_id: <span className="font-medium">{detail.strategy_id}</span></p>
-          <p>version: <span className="font-medium">{detail.strategy_version}</span></p>
-          <p>market: <span className="font-medium">{detail.market}</span></p>
-          <p>rebalance: <span className="font-medium">{detail.rebalance}</span></p>
-          {detail.strategy_family ? (
-            <p>strategy_family: <span className="font-medium">{detail.strategy_family}</span></p>
-          ) : null}
-          {typeof detail.lookback_days === "number" ? (
-            <p>lookback_days: <span className="font-medium">{detail.lookback_days}</span></p>
-          ) : null}
+          <p>source: <span className="font-medium">{detail.source}</span></p>
+          <p>version: <span className="font-medium">{detail.spec.strategy_version}</span></p>
+          <p>strategy_id: <span className="font-medium">{detail.spec.strategy_id}</span></p>
+          <p>market: <span className="font-medium">{detail.spec.market}</span></p>
+          <p>strategy_family: <span className="font-medium">{detail.spec.strategy_family}</span></p>
+          <p>rebalance: <span className="font-medium">{detail.spec.rebalance}</span></p>
+          <p>lookback_days: <span className="font-medium">{detail.spec.lookback_days}</span></p>
+          <p>position_sizing: <span className="font-medium">{detail.spec.position_sizing}</span></p>
+          <p>risk_budget: <span className="font-medium">{detail.spec.risk_budget}</span></p>
+          <p>max_position: <span className="font-medium">{detail.spec.max_position}</span></p>
+          <p>leverage_limit: <span className="font-medium">{detail.spec.leverage_limit}</span></p>
+          <p>simulation_only: <span className="font-medium">{detail.spec.simulation_only ? "true" : "false"}</span></p>
+          {detail.created_at ? <p>created_at: <span className="font-medium">{detail.created_at}</span></p> : null}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
           <div>
-            <CardTitle>Risk Constraints</CardTitle>
-            <CardDescription>Constraint contract used by backtest and execution.</CardDescription>
+            <CardTitle>Strategy Semantics</CardTitle>
+            <CardDescription>Product-facing spec object used for inspection and downstream compilation.</CardDescription>
           </div>
         </CardHeader>
-        <pre className="overflow-x-auto rounded-lg border border-border p-3 text-xs text-muted-foreground">
-          {JSON.stringify(detail.risk_constraints, null, 2)}
-        </pre>
+        <div className="grid gap-3 p-6 pt-0 text-sm">
+          <div>
+            <p className="font-medium">Rationale</p>
+            <p className="mt-1 text-xs text-muted-foreground">{detail.spec.rationale}</p>
+          </div>
+          <div>
+            <p className="font-medium">Constraints</p>
+            <pre className="mt-2 overflow-x-auto rounded-lg border border-border p-3 text-xs text-muted-foreground">
+              {JSON.stringify(detail.spec.constraints, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <p className="font-medium">Factor Weights</p>
+            <pre className="mt-2 overflow-x-auto rounded-lg border border-border p-3 text-xs text-muted-foreground">
+              {JSON.stringify(detail.spec.factor_weights, null, 2)}
+            </pre>
+          </div>
+        </div>
         <p className="mt-2 text-xs text-muted-foreground">{detail.notes}</p>
       </Card>
 
@@ -109,19 +127,19 @@ export default function StrategyDetailPage() {
         </CardHeader>
         <CardContent className="grid gap-2 text-sm md:grid-cols-2">
           <p>
-            enabled: <span className="font-medium">{detail.circuit_breaker?.enabled ? "true" : "false"}</span>
+            enabled: <span className="font-medium">{detail.spec.circuit_breaker?.enabled ? "true" : "false"}</span>
           </p>
           <p>
             rule.type:{" "}
-            <span className="font-medium">{detail.circuit_breaker?.rule?.type ?? "-"}</span>
+            <span className="font-medium">{detail.spec.circuit_breaker?.rule?.type ?? "-"}</span>
           </p>
           <p>
             rule.threshold:{" "}
-            <span className="font-medium">{String(detail.circuit_breaker?.rule?.threshold ?? "-")}</span>
+            <span className="font-medium">{String(detail.spec.circuit_breaker?.rule?.threshold ?? "-")}</span>
           </p>
           <p>
             rule.cool_down_days:{" "}
-            <span className="font-medium">{String(detail.circuit_breaker?.rule?.cool_down_days ?? "-")}</span>
+            <span className="font-medium">{String(detail.spec.circuit_breaker?.rule?.cool_down_days ?? "-")}</span>
           </p>
         </CardContent>
       </Card>
@@ -134,12 +152,34 @@ export default function StrategyDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {!Array.isArray(detail.failure_regimes) || detail.failure_regimes.length === 0 ? (
+          {!Array.isArray(detail.spec.failure_regimes) || detail.spec.failure_regimes.length === 0 ? (
             <p className="text-xs text-muted-foreground">No failure regimes recorded.</p>
           ) : (
             <div className="flex flex-wrap gap-1">
-              {detail.failure_regimes.map((item) => (
+              {detail.spec.failure_regimes.map((item) => (
                 <Badge key={item} variant="muted">
+                  {item}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Evidence Links</CardTitle>
+            <CardDescription>References attached to the durable strategy spec.</CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {detail.spec.evidence_refs.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No evidence links recorded.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {detail.spec.evidence_refs.map((item) => (
+                <Badge key={item} variant="outline">
                   {item}
                 </Badge>
               ))}

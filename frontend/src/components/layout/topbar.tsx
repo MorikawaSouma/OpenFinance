@@ -17,7 +17,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Switch } from "@/components/ui/switch";
 
 export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
   const { mode } = useWorkbenchShellState();
@@ -69,7 +68,23 @@ export function Topbar({ onMobileMenu }: { onMobileMenu: () => void }) {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <Switch checked={mode === "developer"} onCheckedChange={(next) => setMode(next ? "developer" : "user")} />
+          <button
+            type="button"
+            role="switch"
+            aria-checked={mode === "developer"}
+            aria-label="Toggle mode"
+            onClick={() => setMode(mode === "developer" ? "user" : "developer")}
+            className="inline-flex h-6 w-11 items-center rounded-full border-2 border-transparent bg-input transition-colors"
+          >
+            <span className="sr-only">Toggle mode</span>
+            <span className={`inline-flex h-6 w-11 items-center rounded-full transition-colors ${mode === "developer" ? "bg-primary" : "bg-input"}`}>
+              <span
+                className={`block h-5 w-5 rounded-full bg-background shadow-lg transition-transform ${
+                  mode === "developer" ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </span>
+          </button>
 
           <Button
             variant="outline"

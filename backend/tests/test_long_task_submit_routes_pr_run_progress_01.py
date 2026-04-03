@@ -37,10 +37,18 @@ def test_submit_pipeline_run_returns_task_and_completes() -> None:
         assert task_id
         assert task.get("task_type") == "pipeline_run"
 
-        done = _wait_task(client, task_id, timeout_s=90.0)
+        done = _wait_task(client, task_id, timeout_s=120.0)
         assert done["status"] == "done"
         run_id = str((done.get("result_ref") or {}).get("run_id") or "")
         assert run_id
+        pipeline_response = ((done.get("result") or {}).get("pipeline_response") or {})
+        assert pipeline_response.get("strategy_validation", {}).get("schema_version") == "strategy_validation.v1"
+        assert pipeline_response.get("strategy_compilation", {}).get("schema_version") == "strategy_compilation.v1"
+        assert pipeline_response.get("strategy_compilation", {}).get("compilation_profile", {}).get("schema_version") == "strategy_compilation_profile.v1"
+        assert pipeline_response.get("strategy_compilation", {}).get("compilation_policy", {}).get("schema_version") == "strategy_compilation_policy.v1"
+        first_experiment = ((pipeline_response.get("experiments") or [{}])[0]) if isinstance(pipeline_response, dict) else {}
+        assert ((first_experiment.get("backtest_request") or {}).get("evaluation_plan") or {}).get("schema_version") == "backtest_evaluation_plan.v1"
+        assert ((first_experiment.get("backtest_request") or {}).get("evaluation_plan") or {}).get("request_input_profile", {}).get("schema_version") == "strategy_backtest_request_input_profile.v1"
     finally:
         settings.llm_force_stub = previous_force_stub
 
@@ -62,11 +70,23 @@ def test_submit_multi_market_compare_returns_task_and_diff_table() -> None:
     assert task_id
     assert task.get("task_type") == "multi_market.compare"
 
-    done = _wait_task(client, task_id, timeout_s=90.0)
+    done = _wait_task(client, task_id, timeout_s=120.0)
     assert done["status"] == "done"
     result = done.get("result") or {}
     assert isinstance(result.get("diff_table"), list)
     assert len(result.get("diff_table")) >= 2
+    assert (result.get("strategy_validation") or {}).get("schema_version") == "strategy_validation.v1"
+    assert (result.get("strategy_compilation") or {}).get("schema_version") == "strategy_compilation.v1"
+    assert (result.get("strategy_compilation") or {}).get("compilation_profile", {}).get("schema_version") == "strategy_compilation_profile.v1"
+    assert (result.get("strategy_compilation") or {}).get("compilation_policy", {}).get("schema_version") == "strategy_compilation_policy.v1"
+    assert (result.get("outcome_summary") or {}).get("schema_version") == "strategy_compare_outcome_summary.v1"
+    assert len(((result.get("outcome_summary") or {}).get("rows") or [])) >= 2
+    assert (result.get("result_details") or {}).get("schema_version") == "strategy_compare_result_details.v1"
+    assert len(((result.get("result_details") or {}).get("diff_rows") or [])) >= 2
+    assert (((result.get("rows") or [])[0]).get("action_regime_details") or {}).get("schema_version") == "strategy_runtime_action_regime.v1"
+    assert (((result.get("rows") or [])[0]).get("attribution_execution_details") or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1"
+    assert (((result.get("rows") or [])[0]).get("control_optimizer_details") or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1"
+    assert (((result.get("rows") or [])[0]).get("control_action_deep_details") or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1"
 
 
 def test_submit_robustness_returns_task_and_report_summary() -> None:
@@ -87,12 +107,26 @@ def test_submit_robustness_returns_task_and_report_summary() -> None:
     assert task_id
     assert task.get("task_type") == "robustness.run"
 
-    done = _wait_task(client, task_id, timeout_s=90.0)
+    done = _wait_task(client, task_id, timeout_s=180.0)
     assert done["status"] == "done"
     result = done.get("result") or {}
     summary = (result.get("summary") or {}) if isinstance(result, dict) else {}
     assert str(result.get("robustness_id") or "").strip()
     assert isinstance(summary.get("variant_count"), int)
+    assert (result.get("outcome_summary") or {}).get("schema_version") == "strategy_robustness_outcome_summary.v1"
+    report = (result.get("report") or {}) if isinstance(result, dict) else {}
+    assert (report.get("base_strategy_validation") or {}).get("schema_version") == "strategy_validation.v1"
+    assert (report.get("base_strategy_compilation") or {}).get("schema_version") == "strategy_compilation.v1"
+    assert (report.get("base_strategy_compilation") or {}).get("compilation_profile", {}).get("schema_version") == "strategy_compilation_profile.v1"
+    assert (report.get("base_strategy_compilation") or {}).get("compilation_policy", {}).get("schema_version") == "strategy_compilation_policy.v1"
+    assert (report.get("base_backtest_request") or {}).get("evaluation_plan", {}).get("schema_version") == "backtest_evaluation_plan.v1"
+    assert (report.get("base_backtest_request") or {}).get("evaluation_plan", {}).get("request_input_profile", {}).get("schema_version") == "strategy_backtest_request_input_profile.v1"
+    assert (report.get("outcome_summary") or {}).get("schema_version") == "strategy_robustness_outcome_summary.v1"
+    assert (report.get("result_details") or {}).get("schema_version") == "strategy_robustness_result_details.v1"
+    assert ((((report.get("variants") or [])[0]).get("action_regime_details")) or {}).get("schema_version") == "strategy_runtime_action_regime.v1"
+    assert ((((report.get("variants") or [])[0]).get("attribution_execution_details")) or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1"
+    assert ((((report.get("variants") or [])[0]).get("control_optimizer_details")) or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1"
+    assert ((((report.get("variants") or [])[0]).get("control_action_deep_details")) or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1"
 
 
 def test_submit_orchestrator_returns_task_and_response() -> None:

@@ -3,12 +3,12 @@
 import Link from "next/link";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DatasetsPage() {
-  const { datasets, loadingCore } = useWorkbench();
+  const { datasets, isDatasetsBootstrapPending } = useCatalogSummaryState();
 
   return (
     <Card>
@@ -16,7 +16,7 @@ export default function DatasetsPage() {
         <CardTitle>Datasets</CardTitle>
       </CardHeader>
 
-      {loadingCore ? (
+      {isDatasetsBootstrapPending ? (
         <div className="space-y-2">
           {Array.from({ length: 6 }).map((_, i) => (
             <Skeleton key={i} className="h-12 w-full" />

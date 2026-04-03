@@ -65,8 +65,32 @@ def test_backtest_runner_end_to_end(tmp_path: Path) -> None:
     assert isinstance(report.factor_versions, list)
     assert len(report.factor_versions) >= 1
     assert report.factor_versions[0].version
+    assert report.control_optimizer_details is not None
+    assert report.control_optimizer_details.schema_version == "strategy_runtime_control_optimizer.v1"
+    assert report.control_action_deep_details is not None
+    assert report.control_action_deep_details.schema_version == "strategy_runtime_control_action_deep.v1"
+    assert report.attribution_execution_details is not None
+    assert report.attribution_execution_details.schema_version == "strategy_runtime_attribution_execution.v1"
+    assert report.attribution_execution_details.detail_object == "BacktestReport"
     if report.orders:
         assert hasattr(report.orders[0], "reason_code")
         assert hasattr(report.orders[0], "reason_msg")
     assert len(run_registry.list_entries()) == 1
     assert len(audit_store.list_all()) >= 1
+
+
+def test_backtest_runner_trend_signal_stays_flat_when_bearish(tmp_path: Path) -> None:
+    dataset_registry = DatasetRegistry(
+        registry_file=str(tmp_path / "registry" / "datasets.jsonl"),
+        data_root=str(tmp_path / "data"),
+    )
+    runner = BacktestRunner(
+        dataset_registry=dataset_registry,
+        run_registry=RunRegistry(str(tmp_path / "registry" / "runs.jsonl")),
+        audit_store=FileAuditStore(str(tmp_path / "registry" / "audit.jsonl")),
+        report_root=str(tmp_path / "reports"),
+    )
+
+    signal = runner._signal_for_family("trend", [-0.01, -0.02, -0.015], threshold=0.001)
+
+    assert signal == 0.0

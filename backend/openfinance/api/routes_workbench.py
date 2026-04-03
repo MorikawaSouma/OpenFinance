@@ -6,7 +6,7 @@ from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from threading import Thread
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query
@@ -20,10 +20,36 @@ from openfinance.data.mock_factory import MockDataFactory, MockDatasetConfig
 from openfinance.data.registry import DatasetRegistry
 from openfinance.quant.backtest.migration import MigrationChecker, MigrationWarning
 from openfinance.quant.backtest.meta_runner import MetaBacktestConfig, MetaBacktestRunner
-from openfinance.quant.backtest.report import BacktestRequest, BacktestReport, CostModel
+from openfinance.quant.backtest.report import BacktestRequest, BacktestReport
 from openfinance.quant.backtest.robustness import RobustnessReport
-from openfinance.quant.backtest.run_registry import RunRegistry
+from openfinance.quant.backtest.run_registry import RunRegistry, RunRegistryEntry
 from openfinance.quant.backtest.runner import BacktestRunner
+from openfinance.quant.backtest.strategy_runtime_action_regime import (
+    StrategyRuntimeActionRegimeDetails,
+    resolve_strategy_runtime_action_regime_details,
+)
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    StrategyRuntimeAttributionExecutionDetails,
+    resolve_strategy_runtime_attribution_execution_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    StrategyRuntimeControlActionDeepDetails,
+    resolve_strategy_runtime_control_action_deep_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    StrategyRuntimeControlOptimizerDetails,
+    resolve_strategy_runtime_control_optimizer_details,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import (
+    StrategyCompareResultDetails,
+    build_strategy_compare_result_details,
+    build_strategy_runtime_diagnostics_result,
+)
+from openfinance.quant.backtest.strategy_runtime_summary import (
+    StrategyCompareOutcomeSummary,
+    build_strategy_compare_outcome_summary,
+    build_strategy_runtime_outcome_summary,
+)
 from openfinance.quant.factors.engine import FactorEngine
 from openfinance.quant.factors.factor_spec import (
     CostSensitivity,
@@ -35,6 +61,15 @@ from openfinance.quant.factors.factor_spec import (
 )
 from openfinance.quant.checks.failure_conditions import normalize_failure_conditions
 from openfinance.quant.factors.registry import FactorRegistry
+from openfinance.research.strategy_registry import StrategyRegistry
+from openfinance.research.strategy_compilation import (
+    StrategyCompilationPlan,
+    build_strategy_compile_runtime_context,
+    build_strategy_compilation_plan,
+)
+from openfinance.research.strategy_request_builder import build_strategy_backtest_request
+from openfinance.research.strategy_spec import StrategySpec, build_strategy_spec_from_constraints
+from openfinance.research.strategy_validation import StrategyValidationResult, StrategyValidator
 
 router = APIRouter(prefix="/workbench", tags=["workbench"])
 logger = logging.getLogger(__name__)
@@ -86,6 +121,13 @@ class StrategySummary(BaseModel):
     notes: str
 
 
+class StrategyDetailResponse(BaseModel):
+    source: Literal["strategy_registry", "run_registry_fallback", "placeholder"]
+    created_at: str | None = None
+    notes: str = ""
+    spec: StrategySpec
+
+
 class RunSummary(BaseModel):
     run_id: str
     audit_trace_id: str | None = None
@@ -128,12 +170,20 @@ class MarketCompareRow(BaseModel):
     dataset_version: str
     strategy_version: str
     metrics: dict[str, Any]
+    action_regime_details: StrategyRuntimeActionRegimeDetails | None = None
+    attribution_execution_details: StrategyRuntimeAttributionExecutionDetails | None = None
+    control_optimizer_details: StrategyRuntimeControlOptimizerDetails | None = None
+    control_action_deep_details: StrategyRuntimeControlActionDeepDetails | None = None
 
 
 class MultiMarketCompareResponse(BaseModel):
     compare_id: str
     baseline_market: str
-    strategy_spec: dict[str, Any]
+    strategy_spec: StrategySpec
+    strategy_validation: StrategyValidationResult
+    strategy_compilation: StrategyCompilationPlan
+    outcome_summary: StrategyCompareOutcomeSummary | None = None
+    result_details: StrategyCompareResultDetails | None = None
     rows: list[MarketCompareRow]
     diff_table: list[dict[str, Any]]
     parent_task_id: str | None = None
@@ -288,6 +338,11 @@ def _factor_registry() -> FactorRegistry:
 
 
 @lru_cache(maxsize=1)
+def _strategy_registry() -> StrategyRegistry:
+    return StrategyRegistry(settings.strategy_registry_db_file)
+
+
+@lru_cache(maxsize=1)
 def _factor_engine() -> FactorEngine:
     return FactorEngine(
         dataset_registry=_dataset_registry(),
@@ -343,6 +398,29 @@ def _emit_task_state(event_type: str, trace_id: UUID, task: TaskRecord, **extra:
     payload["session_id"] = session_id
     _write_audit(event_type, trace_id, payload)
     _emit_event(event_type, trace_id, payload, session_id=session_id)
+
+def _strategy_spec_from_run_entry(entry: RunRegistryEntry) -> StrategySpec:
+    req = entry.request
+    constraints = req.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+    evidence_refs_raw = req.get("evidence_refs")
+    return build_strategy_spec_from_constraints(
+        strategy_id=str(entry.strategy_id),
+        strategy_version=str(entry.strategy_version),
+        plan_id=str(constraints.get("plan_id") or "").strip() or None,
+        experiment_id=str(constraints.get("experiment_id") or "").strip() or None,
+        market=str(entry.market or req.get("market", "US")),
+        constraints=constraints,
+        rationale=str(constraints.get("rationale", "Derived from run registry")).strip() or "Derived from run registry",
+        evidence_refs=[
+            str(ref).strip()
+            for ref in evidence_refs_raw
+            if str(ref).strip()
+        ]
+        if isinstance(evidence_refs_raw, list)
+        else [],
+    )
 
 
 def _run_dataset_job(task_id: UUID, trace_id: UUID, req: GenerateDatasetRequest) -> None:
@@ -735,7 +813,26 @@ def get_report(run_id: str) -> BacktestReport:
         report_path = Path(entry.report_path)
         if not report_path.exists():
             break
-        return BacktestReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+        report = BacktestReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+        return report.model_copy(
+            update={
+                "attribution_execution_details": resolve_strategy_runtime_attribution_execution_details(
+                    detail_object="BacktestReport",
+                    details=report.attribution_execution_details,
+                    cost_breakdown=report.cost_breakdown,
+                    attribution=report.attribution,
+                    diagnostics=report.diagnostics,
+                    orders=report.orders,
+                    trades=report.trades,
+                    metrics=report.metrics,
+                ),
+                "control_action_deep_details": resolve_strategy_runtime_control_action_deep_details(
+                    detail_object="BacktestReport",
+                    details=report.control_action_deep_details,
+                    diagnostics=report.diagnostics,
+                )
+            }
+        )
     raise HTTPException(status_code=404, detail="report not found")
 
 
@@ -757,23 +854,46 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
         audit_store=_audit_store(),
         report_root=settings.data_root,
     )
-    strategy_spec = {
-        "strategy_id": request.strategy_id,
-        "strategy_version": request.strategy_version,
-        "strategy_family": request.strategy_family,
-        "rebalance": request.rebalance,
-        "lookback_days": request.lookback_days,
-        "signal_threshold": request.signal_threshold,
-        "position_sizing": request.position_sizing,
-        "risk_budget": request.risk_budget,
-        "max_position": request.max_position,
-        "leverage_limit": request.leverage_limit,
-        "auto_round_lot": request.auto_round_lot,
-        "commission_bps": request.commission_bps,
-        "slippage_bps": request.slippage_bps,
-        "start": request.start,
-        "end": request.end,
-    }
+    strategy_validator = StrategyValidator()
+    strategy_spec = build_strategy_spec_from_constraints(
+        strategy_id=request.strategy_id,
+        strategy_version=request.strategy_version,
+        market=markets[0],
+        constraints={
+            "strategy_family": request.strategy_family,
+            "rebalance": request.rebalance,
+            "lookback_days": request.lookback_days,
+            "signal_threshold": request.signal_threshold,
+            "position_sizing": request.position_sizing,
+            "risk_budget": request.risk_budget,
+            "max_position": request.max_position,
+            "leverage_limit": request.leverage_limit,
+            "auto_round_lot": request.auto_round_lot,
+            "commission_bps": request.commission_bps,
+            "slippage_bps": request.slippage_bps,
+            "start": request.start,
+            "end": request.end,
+        },
+        rationale="Multi-market comparison base strategy semantics derived from request.",
+    )
+    strategy_validation = strategy_validator.validate_spec(strategy_spec)
+    runtime_context = build_strategy_compile_runtime_context(
+        dataset_version="multi_market.compare",
+        start=request.start,
+        end=request.end,
+        execution_model="next_open",
+        run_time_utc="16:00",
+        commission_bps=request.commission_bps,
+        slippage_bps=request.slippage_bps,
+        auto_round_lot=request.auto_round_lot,
+        provenance_mode="user_requested",
+    )
+    strategy_compilation = build_strategy_compilation_plan(
+        strategy_spec,
+        strategy_validation,
+        runtime_context=runtime_context,
+    )
+    strategy_spec_payload = strategy_spec.model_dump(mode="json")
     parent_task = tm.create(
         task_type="multi_market.compare",
         message="queued",
@@ -916,17 +1036,29 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
                 )
             )
             dataset_entry = _dataset_registry().register(dataset)
-            backtest_request = BacktestRequest(
+            market_strategy_spec = strategy_spec.model_copy(update={"market": market}, deep=True)
+            market_strategy_validation = strategy_validator.validate_spec(market_strategy_spec)
+            market_runtime_context = build_strategy_compile_runtime_context(
                 dataset_version=dataset_entry.dataset_version,
+                start=request.start,
+                end=request.end,
+                execution_model="next_open",
+                run_time_utc="16:00",
+                commission_bps=request.commission_bps,
+                slippage_bps=request.slippage_bps,
+                auto_round_lot=request.auto_round_lot,
+                provenance_mode="user_requested",
+            )
+            market_strategy_compilation = build_strategy_compilation_plan(
+                market_strategy_spec,
+                market_strategy_validation,
+                runtime_context=market_runtime_context,
+            )
+            backtest_request = build_strategy_backtest_request(
                 strategy_id=request.strategy_id,
                 strategy_version=request.strategy_version,
                 market=market,
-                start=request.start,
-                end=request.end,
-                cost_model=CostModel(
-                    commission_bps=request.commission_bps,
-                    slippage_bps=request.slippage_bps,
-                ),
+                runtime_context=market_runtime_context,
                 constraints={
                     "strategy_family": request.strategy_family,
                     "rebalance": request.rebalance,
@@ -938,27 +1070,81 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
                     "leverage_limit": request.leverage_limit,
                     "auto_round_lot": request.auto_round_lot,
                 },
+                strategy_validation=market_strategy_validation,
+                strategy_compilation=market_strategy_compilation,
             )
-            current_warnings = migration_checker.check(backtest_request.constraints, market, rules)
+            current_warnings = migration_checker.check(strategy_spec, market, rules)
             market_warnings[market] = current_warnings
             flat_warnings.extend(current_warnings)
             report = runner.run(backtest_request)
+            action_regime_details = resolve_strategy_runtime_action_regime_details(
+                detail_object="MarketCompareRow",
+                details=report.action_regime_details,
+                diagnostics=report.diagnostics,
+            )
+            attribution_execution_details = resolve_strategy_runtime_attribution_execution_details(
+                detail_object="MarketCompareRow",
+                details=report.attribution_execution_details,
+                cost_breakdown=report.cost_breakdown,
+                attribution=report.attribution,
+                diagnostics=report.diagnostics,
+                orders=report.orders,
+                trades=report.trades,
+                metrics=report.metrics,
+            )
+            control_optimizer_details = resolve_strategy_runtime_control_optimizer_details(
+                detail_object="MarketCompareRow",
+                details=report.control_optimizer_details,
+                diagnostics=report.diagnostics,
+            )
+            control_action_deep_details = resolve_strategy_runtime_control_action_deep_details(
+                detail_object="MarketCompareRow",
+                details=report.control_action_deep_details,
+                diagnostics=report.diagnostics,
+            )
             row = MarketCompareRow(
                 market=market,
                 run_id=str(report.run_id),
                 dataset_version=report.dataset_version,
                 strategy_version=report.strategy_version,
                 metrics=report.metrics,
+                action_regime_details=action_regime_details,
+                attribution_execution_details=attribution_execution_details,
+                control_optimizer_details=control_optimizer_details,
+                control_action_deep_details=control_action_deep_details,
             )
             rows.append(row)
             done_markets += 1
             if child_id is not None:
+                child_runtime_summary = report.runtime_summary or build_strategy_runtime_outcome_summary(
+                    summary_object="MarketCompareRow",
+                    run_id=str(report.run_id),
+                    dataset_version=report.dataset_version,
+                    market=row.market,
+                    strategy_version=report.strategy_version,
+                    metrics=report.metrics,
+                    strategy_trace=report.strategy_trace,
+                    warning_count=len(market_warnings.get(row.market, [])),
+                    highest_warning_severity=migration_checker.highest_severity(market_warnings.get(row.market, [])),
+                )
+                child_runtime_diagnostics = report.runtime_diagnostics or build_strategy_runtime_diagnostics_result(
+                    diagnostics_object="BacktestReport",
+                    diagnostics=report.diagnostics,
+                )
                 child_done = tm.update(
                     child_id,
                     status="done",
                     progress=100,
                     message=f"done: {market}",
-                    result={"metrics": dict(report.metrics)},
+                    result={
+                        "metrics": dict(report.metrics),
+                        "runtime_summary": child_runtime_summary.model_dump(mode="json"),
+                        "runtime_diagnostics": child_runtime_diagnostics.model_dump(mode="json"),
+                        "action_regime_details": action_regime_details.model_dump(mode="json"),
+                        "attribution_execution_details": attribution_execution_details.model_dump(mode="json"),
+                        "control_optimizer_details": control_optimizer_details.model_dump(mode="json"),
+                        "control_action_deep_details": control_action_deep_details.model_dump(mode="json"),
+                    },
                     result_ref={
                         "run_id": str(report.run_id),
                         "report_id": str(report.run_id),
@@ -1052,13 +1238,44 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
             }
         )
 
+    outcome_summary_rows = [
+        build_strategy_runtime_outcome_summary(
+            summary_object="MarketCompareRow",
+            run_id=row.run_id,
+            dataset_version=row.dataset_version,
+            market=row.market,
+            strategy_version=row.strategy_version,
+            metrics=row.metrics,
+            warning_count=len(market_warnings.get(row.market, [])),
+            highest_warning_severity=migration_checker.highest_severity(market_warnings.get(row.market, [])),
+        )
+        for row in rows
+    ]
+    outcome_summary = build_strategy_compare_outcome_summary(
+        compare_id=compare_id,
+        baseline_market=baseline.market,
+        rows=outcome_summary_rows,
+    )
+    result_details = build_strategy_compare_result_details(
+        compare_id=compare_id,
+        baseline_market=baseline.market,
+        diff_rows=diff_table,
+        market_warnings={
+            key: [item.model_dump(mode="json") for item in values] for key, values in market_warnings.items()
+        },
+    )
+
     _write_audit(
         "workbench.multi_market.compare",
         trace_id,
         {
             "compare_id": compare_id,
             "baseline_market": baseline.market,
-            "strategy_spec": strategy_spec,
+            "strategy_spec": strategy_spec_payload,
+            "strategy_validation": strategy_validation.model_dump(mode="json"),
+            "strategy_compilation": strategy_compilation.model_dump(mode="json"),
+            "outcome_summary": outcome_summary.model_dump(mode="json"),
+            "result_details": result_details.model_dump(mode="json"),
             "rows": [row.model_dump(mode="json") for row in rows],
             "diff_table": diff_table,
             "market_warnings": {
@@ -1085,7 +1302,11 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
             "compare_id": compare_id,
             "baseline_market": baseline.market,
             "row_count": len(rows),
-            "strategy_spec": strategy_spec,
+            "strategy_spec": strategy_spec_payload,
+            "strategy_validation": strategy_validation.model_dump(mode="json"),
+            "strategy_compilation": strategy_compilation.model_dump(mode="json"),
+            "outcome_summary": outcome_summary.model_dump(mode="json"),
+            "result_details": result_details.model_dump(mode="json"),
             "rows": [row.model_dump(mode="json") for row in rows],
             "diff_table": diff_table,
             "migration_warnings": [item.model_dump(mode="json") for item in flat_warnings],
@@ -1116,6 +1337,10 @@ def compare_multi_market(request: MultiMarketCompareRequest) -> MultiMarketCompa
         compare_id=compare_id,
         baseline_market=baseline.market,
         strategy_spec=strategy_spec,
+        strategy_validation=strategy_validation,
+        strategy_compilation=strategy_compilation,
+        outcome_summary=outcome_summary,
+        result_details=result_details,
         rows=rows,
         diff_table=diff_table,
         parent_task_id=str(parent_task.task_id),
@@ -1154,7 +1379,11 @@ def submit_multi_market_compare_task(request: MultiMarketCompareRequest) -> Task
             logger.exception("submit_multi_market_compare_task worker failed")
 
     Thread(target=_worker, daemon=True).start()
-    return _wait_task_by_request_token(task_type="multi_market.compare", request_token=request_token)
+    return _wait_task_by_request_token(
+        task_type="multi_market.compare",
+        request_token=request_token,
+        timeout_s=12.0,
+    )
 
 
 @router.post("/reports/robustness/run", response_model=RobustnessReport)
@@ -1168,17 +1397,11 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
     if start_date >= end_date:
         raise HTTPException(status_code=400, detail="start must be earlier than end")
 
-    base_request = BacktestRequest(
-        dataset_version=dataset_version,
+    strategy_validator = StrategyValidator()
+    base_strategy_spec = build_strategy_spec_from_constraints(
         strategy_id=request.strategy_id,
         strategy_version=request.strategy_version,
         market=request.market.upper(),
-        start=request.start,
-        end=request.end,
-        cost_model=CostModel(
-            commission_bps=request.commission_bps,
-            slippage_bps=request.slippage_bps,
-        ),
         constraints={
             "strategy_family": request.strategy_family,
             "rebalance": request.rebalance,
@@ -1190,6 +1413,43 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
             "leverage_limit": request.leverage_limit,
             "auto_round_lot": request.auto_round_lot,
         },
+        rationale="Robustness base strategy semantics derived from request.",
+    )
+    base_strategy_validation = strategy_validator.validate_spec(base_strategy_spec)
+    base_runtime_context = build_strategy_compile_runtime_context(
+        dataset_version=dataset_version,
+        start=request.start,
+        end=request.end,
+        execution_model="next_open",
+        run_time_utc="16:00",
+        commission_bps=request.commission_bps,
+        slippage_bps=request.slippage_bps,
+        auto_round_lot=request.auto_round_lot,
+        provenance_mode="user_requested",
+    )
+    base_strategy_compilation = build_strategy_compilation_plan(
+        base_strategy_spec,
+        base_strategy_validation,
+        runtime_context=base_runtime_context,
+    )
+    base_request = build_strategy_backtest_request(
+        strategy_id=request.strategy_id,
+        strategy_version=request.strategy_version,
+        market=request.market.upper(),
+        runtime_context=base_runtime_context,
+        constraints={
+            "strategy_family": request.strategy_family,
+            "rebalance": request.rebalance,
+            "lookback_days": request.lookback_days,
+            "signal_threshold": request.signal_threshold,
+            "position_sizing": request.position_sizing,
+            "risk_budget": request.risk_budget,
+            "max_position": request.max_position,
+            "leverage_limit": request.leverage_limit,
+            "auto_round_lot": request.auto_round_lot,
+        },
+        strategy_validation=base_strategy_validation,
+        strategy_compilation=base_strategy_compilation,
     )
     multipliers: list[float] = [max(0.0, float(value)) for value in request.cost_multipliers]
     if not any(abs(value - 1.0) <= 1e-9 for value in multipliers):
@@ -1216,16 +1476,15 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
     session_id = str(request.session_id or "").strip()
     request_token = str(request.request_token or "").strip()
     tm = _task_manager()
-    planned_variants = meta_runner.plan_variants(base_request, meta_config)
     parent_task = tm.create(
         task_type="robustness.run",
-        message="queued",
+        message="planning variants",
         status="queued",
         meta={
             "market": request.market.upper(),
             "strategy_id": request.strategy_id,
             "strategy_version": request.strategy_version,
-            "variant_total": len(planned_variants),
+            "variant_total": 0,
             "session_id": session_id,
             "request_token": request_token,
         },
@@ -1235,51 +1494,8 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
 
     child_task_map: dict[str, UUID] = {}
     child_task_ids: list[str] = []
-    for idx, plan in enumerate(planned_variants):
-        child = tm.create(
-            task_type="robustness.variant",
-            message=f"queued: {plan.get('scenario', '')}",
-            parent_task_id=parent_task.task_id,
-            status="queued",
-            meta={
-                "variant_id": str(plan.get("variant_id", "")),
-                "group": str(plan.get("group", "")),
-                "scenario": str(plan.get("scenario", "")),
-                "variant_index": idx + 1,
-                "variant_total": len(planned_variants),
-                "session_id": session_id,
-                "request_token": request_token,
-            },
-        )
-        variant_key = str(plan.get("variant_id", f"variant_{idx + 1}"))
-        child_task_map[variant_key] = child.task_id
-        child_task_ids.append(str(child.task_id))
-        _emit_task_state(
-            "task.created",
-            trace_id,
-            child,
-            role="child",
-            parent_task_id=str(parent_task.task_id),
-            variant_id=variant_key,
-        )
-
-    parent_task = tm.update(
-        parent_task.task_id,
-        status="running",
-        progress=5,
-        message=f"queued {len(planned_variants)} variants",
-    )
-    _emit_task_state(
-        "task.progress",
-        trace_id,
-        parent_task,
-        role="parent",
-        parent_task_id=str(parent_task.task_id),
-        variant_done=0,
-        variant_total=len(planned_variants),
-    )
-
     completed_children = 0
+    planned_variants: list[dict[str, Any]] = []
 
     def _update_parent_progress(*, progress: int, message: str, stage: str) -> None:
         parent = tm.update(
@@ -1323,12 +1539,28 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
         if phase == "variant.done" and child_task_id is not None:
             run_id = str(event.get("run_id", ""))
             metrics = event.get("metrics")
+            action_regime_details = event.get("action_regime_details")
+            attribution_execution_details = event.get("attribution_execution_details")
+            control_optimizer_details = event.get("control_optimizer_details")
+            control_action_deep_details = event.get("control_action_deep_details")
             child = tm.update(
                 child_task_id,
                 status="done",
                 progress=100,
                 message=f"done: {event.get('scenario', '')}",
-                result={"metrics": metrics if isinstance(metrics, dict) else {}},
+                result={
+                    "metrics": metrics if isinstance(metrics, dict) else {},
+                    "action_regime_details": action_regime_details if isinstance(action_regime_details, dict) else None,
+                    "attribution_execution_details": (
+                        attribution_execution_details if isinstance(attribution_execution_details, dict) else None
+                    ),
+                    "control_optimizer_details": (
+                        control_optimizer_details if isinstance(control_optimizer_details, dict) else None
+                    ),
+                    "control_action_deep_details": (
+                        control_action_deep_details if isinstance(control_action_deep_details, dict) else None
+                    ),
+                },
                 result_ref={
                     "run_id": run_id,
                     "report_id": run_id,
@@ -1377,6 +1609,69 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
             _update_parent_progress(progress=99, message="finalizing robustness report", stage="finalize")
 
     try:
+        parent_task = tm.update(
+            parent_task.task_id,
+            status="running",
+            progress=2,
+            message="planning robustness variants",
+        )
+        _emit_task_state(
+            "task.progress",
+            trace_id,
+            parent_task,
+            role="parent",
+            parent_task_id=str(parent_task.task_id),
+            stage="variants.plan",
+            variant_done=0,
+            variant_total=0,
+        )
+        planned_variants = meta_runner.plan_variants(base_request, meta_config)
+        parent_task = tm.update(
+            parent_task.task_id,
+            status="running",
+            progress=5,
+            message=f"queued {len(planned_variants)} variants",
+            meta={
+                **(tm.get(parent_task.task_id).meta if tm.get(parent_task.task_id) else {}),
+                "variant_total": len(planned_variants),
+            },
+        )
+        _emit_task_state(
+            "task.progress",
+            trace_id,
+            parent_task,
+            role="parent",
+            parent_task_id=str(parent_task.task_id),
+            variant_done=0,
+            variant_total=len(planned_variants),
+        )
+        for idx, plan in enumerate(planned_variants):
+            child = tm.create(
+                task_type="robustness.variant",
+                message=f"queued: {plan.get('scenario', '')}",
+                parent_task_id=parent_task.task_id,
+                status="queued",
+                meta={
+                    "variant_id": str(plan.get("variant_id", "")),
+                    "group": str(plan.get("group", "")),
+                    "scenario": str(plan.get("scenario", "")),
+                    "variant_index": idx + 1,
+                    "variant_total": len(planned_variants),
+                    "session_id": session_id,
+                    "request_token": request_token,
+                },
+            )
+            variant_key = str(plan.get("variant_id", f"variant_{idx + 1}"))
+            child_task_map[variant_key] = child.task_id
+            child_task_ids.append(str(child.task_id))
+            _emit_task_state(
+                "task.created",
+                trace_id,
+                child,
+                role="child",
+                parent_task_id=str(parent_task.task_id),
+                variant_id=variant_key,
+            )
         if settings.task_force_error:
             raise RuntimeError("forced task failure via OPENFINANCE_TASK_FORCE_ERROR=true")
         robustness = meta_runner.run(base_request, meta_config, progress_callback=_on_meta_progress)
@@ -1427,6 +1722,8 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
             "robustness_id": robustness.robustness_id,
             "variant_count": robustness.summary.variant_count,
             "summary": robustness.summary.model_dump(mode="json"),
+            "outcome_summary": robustness.outcome_summary.model_dump(mode="json") if robustness.outcome_summary else None,
+            "result_details": robustness.result_details.model_dump(mode="json") if robustness.result_details else None,
             "report": robustness.model_dump(mode="json"),
         },
         result_ref={
@@ -1470,6 +1767,8 @@ def run_robustness(request: RobustnessRunRequest) -> RobustnessReport:
             "strategy_version": robustness.strategy_version,
             "variant_count": robustness.summary.variant_count,
             "summary": robustness.summary.model_dump(mode="json"),
+            "outcome_summary": robustness.outcome_summary.model_dump(mode="json") if robustness.outcome_summary else None,
+            "result_details": robustness.result_details.model_dump(mode="json") if robustness.result_details else None,
         },
     )
     _emit_event(
@@ -1508,21 +1807,42 @@ def submit_robustness_task(request: RobustnessRunRequest) -> TaskRecord:
             logger.exception("submit_robustness_task worker failed")
 
     Thread(target=_worker, daemon=True).start()
-    return _wait_task_by_request_token(task_type="robustness.run", request_token=request_token)
+    return _wait_task_by_request_token(
+        task_type="robustness.run",
+        request_token=request_token,
+        timeout_s=12.0,
+    )
 
 
 @router.get("/strategies", response_model=list[StrategySummary])
 def list_strategies() -> list[StrategySummary]:
-    versions = sorted({entry.strategy_version for entry in _run_registry().list_entries()})
-    rows = [
-        StrategySummary(
-            strategy_id="demo_strategy",
-            strategy_version=version,
-            status="registered",
-            notes="Generated from run registry",
+    rows: list[StrategySummary] = []
+    seen_versions: set[str] = set()
+    for entry in _strategy_registry().list_entries():
+        if entry.version in seen_versions:
+            continue
+        seen_versions.add(entry.version)
+        rows.append(
+            StrategySummary(
+                strategy_id=entry.strategy_id,
+                strategy_version=entry.version,
+                status="registered",
+                notes=f"{entry.market} {entry.strategy_family} spec",
+            )
         )
-        for version in versions
-    ]
+    for entry in reversed(_run_registry().list_entries()):
+        version = str(entry.strategy_version)
+        if version in seen_versions:
+            continue
+        seen_versions.add(version)
+        rows.append(
+            StrategySummary(
+                strategy_id=str(entry.strategy_id),
+                strategy_version=version,
+                status="derived",
+                notes="Derived from run registry",
+            )
+        )
     if not rows:
         rows.append(
             StrategySummary(
@@ -1535,96 +1855,50 @@ def list_strategies() -> list[StrategySummary]:
     return rows
 
 
-@router.get("/strategies/{strategy_version}")
-def get_strategy(strategy_version: str) -> dict[str, Any]:
-    def _default_circuit_breaker(threshold: float = 0.1) -> dict[str, Any]:
-        return {
-            "enabled": True,
-            "rule": {
-                "type": "drawdown",
-                "threshold": float(max(0.0, threshold)),
-                "cool_down_days": 5,
-            },
-        }
-
-    def _normalize_circuit_breaker(raw: Any, *, drawdown_threshold: float) -> dict[str, Any]:
-        allowed = {"consecutive_losses", "drawdown", "vol_spike"}
-        fallback = _default_circuit_breaker(drawdown_threshold)
-        if not isinstance(raw, dict):
-            return fallback
-        enabled = raw.get("enabled")
-        if not isinstance(enabled, bool):
-            enabled = fallback["enabled"]
-        rule = raw.get("rule")
-        if not isinstance(rule, dict):
-            return {**fallback, "enabled": enabled}
-        rule_type = str(rule.get("type", "drawdown")).strip().lower()
-        if rule_type not in allowed:
-            rule_type = "drawdown"
-        threshold = rule.get("threshold")
-        if not isinstance(threshold, (int, float)):
-            threshold = fallback["rule"]["threshold"]
-        cool_down = rule.get("cool_down_days")
-        if not isinstance(cool_down, (int, float)):
-            cool_down = fallback["rule"]["cool_down_days"]
-        return {
-            "enabled": enabled,
-            "rule": {
-                "type": rule_type,
-                "threshold": float(max(0.0, float(threshold))),
-                "cool_down_days": int(max(0, int(cool_down))),
-            },
-        }
-
-    def _normalize_failure_regimes(raw: Any) -> list[str]:
-        if not isinstance(raw, list):
-            return ["range_bound_market", "high_correlation_breakdown", "frequent_gap_moves"]
-        rows = [str(item).strip() for item in raw if str(item).strip()]
-        if not rows:
-            return ["range_bound_market", "high_correlation_breakdown", "frequent_gap_moves"]
-        return list(dict.fromkeys(rows))[:8]
+@router.get("/strategies/{strategy_version}", response_model=StrategyDetailResponse)
+def get_strategy(strategy_version: str) -> StrategyDetailResponse:
+    entry = _strategy_registry().get_by_version(strategy_version)
+    if entry is not None:
+        return StrategyDetailResponse(
+            source="strategy_registry",
+            created_at=entry.created_at.isoformat(),
+            notes="Registry-backed strategy spec",
+            spec=entry.spec,
+        )
 
     entries = [e for e in _run_registry().list_entries() if e.strategy_version == strategy_version]
     if not entries:
         if strategy_version == "0.1.0":
-            return {
-                "strategy_id": "demo_strategy",
-                "strategy_version": strategy_version,
-                "market": "US",
-                "rebalance": "weekly",
-                "risk_constraints": {"max_drawdown_target": 0.1, "position_limit": 0.12},
-                "circuit_breaker": _default_circuit_breaker(0.1),
-                "failure_regimes": ["range_bound_market", "high_correlation_breakdown", "frequent_gap_moves"],
-                "notes": "placeholder strategy",
-            }
+            return StrategyDetailResponse(
+                source="placeholder",
+                notes="placeholder strategy",
+                spec=StrategySpec(
+                    strategy_id="demo_strategy",
+                    strategy_version=strategy_version,
+                    market="US",
+                    strategy_family="demo_strategy",
+                    rebalance="weekly",
+                    lookback_days=20,
+                    signal_threshold=0.0,
+                    position_sizing="risk_budget",
+                    risk_budget="vol_target_10pct",
+                    max_position=0.12,
+                    stop_loss=0.06,
+                    leverage_limit=1.0,
+                    factor_weights={},
+                    constraints={"max_drawdown_target": 0.1, "position_limit": 0.12},
+                    circuit_breaker=_default_strategy_circuit_breaker(0.1),
+                    failure_regimes=["range_bound_market", "high_correlation_breakdown", "frequent_gap_moves"],
+                    rationale="placeholder strategy",
+                ),
+            )
         raise HTTPException(status_code=404, detail="strategy not found")
     latest = entries[-1]
-    req = latest.request
-    constraints = req.get("constraints", {})
-    drawdown_threshold = float(constraints.get("max_drawdown_target", 0.1) or 0.1)
-    circuit_breaker = _normalize_circuit_breaker(
-        constraints.get("circuit_breaker"),
-        drawdown_threshold=drawdown_threshold,
+    return StrategyDetailResponse(
+        source="run_registry_fallback",
+        notes="Derived from run registry",
+        spec=_strategy_spec_from_run_entry(latest),
     )
-    failure_regimes = _normalize_failure_regimes(constraints.get("failure_regimes"))
-    return {
-        "strategy_id": latest.strategy_id,
-        "strategy_version": latest.strategy_version,
-        "market": req.get("market", "US"),
-        "rebalance": constraints.get("rebalance", "weekly"),
-        "strategy_family": constraints.get("strategy_family", latest.strategy_id),
-        "lookback_days": constraints.get("lookback_days", 20),
-        "risk_budget": constraints.get("risk_budget", "vol_target_10pct"),
-        "risk_constraints": {
-            "max_drawdown_target": constraints.get("max_drawdown_target", 0.1),
-            "position_limit": constraints.get("max_position", 0.12),
-            "turnover_target": constraints.get("turnover_target", 0.3),
-            "leverage_limit": constraints.get("leverage_limit", 1.0),
-        },
-        "circuit_breaker": circuit_breaker,
-        "failure_regimes": failure_regimes,
-        "notes": "derived from run registry",
-    }
 
 
 @router.get("/factors", response_model=list[FactorSummary])

@@ -5,7 +5,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useCatalogSummaryActions, useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useResearchContextState, useResearchRestoreActions } from "@/components/providers/research-context-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
+import { useWorkbenchShellActions } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,10 +17,40 @@ import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { messages } from "@/lib/messages";
-import type { BacktestReport, MultiMarketCompareResponse, RobustnessReport } from "@/lib/types";
+import type {
+  BacktestEvaluationPlan,
+  BacktestReport,
+  MultiMarketCompareResponse,
+  PipelineResponse,
+  RobustnessReport,
+  StrategyCompilationPlan,
+  StrategySpec,
+  StrategyValidationResult,
+  TaskRecord,
+} from "@/lib/types";
 
 function toNum(value: unknown): number | null {
   return typeof value === "number" ? value : null;
+}
+
+function extractPipelineResponse(task: TaskRecord): PipelineResponse | null {
+  if (String(task.task_type) !== "pipeline_run") return null;
+  const result = task.result && typeof task.result === "object" ? (task.result as Record<string, unknown>) : {};
+  const payload = result.pipeline_response;
+  return payload && typeof payload === "object" ? (payload as PipelineResponse) : null;
+}
+
+function validationBadgeVariant(status: string) {
+  if (status === "invalid") return "destructive" as const;
+  if (status === "warn") return "warning" as const;
+  return "success" as const;
+}
+
+function parseEvaluationPlan(value: unknown): BacktestEvaluationPlan | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.schema_version !== "string") return null;
+  return payload as BacktestEvaluationPlan;
 }
 
 const MARKET_OPTIONS = ["US", "CN", "JP", "CRYPTO"] as const;
@@ -25,7 +58,12 @@ const STRATEGY_FAMILIES = ["trend", "mean_reversion", "value", "risk_parity"] as
 const REBALANCE_OPTIONS = ["daily", "weekly", "biweekly", "monthly"] as const;
 
 export default function ReportsPage() {
-  const { runs, latestPipeline, loadingCore, pushToast, restoreTraceContext, tasks, activeSessionId } = useWorkbench();
+  const { refreshRuns } = useCatalogSummaryActions();
+  const { runs, isRunsBootstrapPending } = useCatalogSummaryState();
+  const { lastSessionId } = useResearchContextState();
+  const { restoreTraceToResearchContext } = useResearchRestoreActions();
+  const { tasks } = useTaskRealtimeState();
+  const { pushToast } = useWorkbenchShellActions();
   const router = useRouter();
 
   const [runA, setRunA] = useState("");
@@ -61,7 +99,19 @@ export default function ReportsPage() {
   const [robustMaxVariants, setRobustMaxVariants] = useState(8);
   const multiMarketTaskEventRef = useRef("");
   const robustnessTaskEventRef = useRef("");
-  const sessionTaskScope = useMemo(() => (activeSessionId || "reports").trim(), [activeSessionId]);
+  const sessionTaskScope = useMemo(() => (lastSessionId || "reports").trim(), [lastSessionId]);
+
+  useEffect(() => {
+    void refreshRuns().catch(() => undefined);
+  }, [refreshRuns]);
+
+  const latestPipeline = useMemo(() => {
+    for (const task of tasks) {
+      const payload = extractPipelineResponse(task);
+      if (payload) return payload;
+    }
+    return null;
+  }, [tasks]);
 
   const metricsRows = useMemo(() => {
     if (!reportA || !reportB) return [];
@@ -122,13 +172,28 @@ export default function ReportsPage() {
     const result = multiMarketTask.result && typeof multiMarketTask.result === "object" ? (multiMarketTask.result as Record<string, unknown>) : {};
     if (status === "done") {
       const rowsRaw = Array.isArray(result.rows) ? result.rows : [];
+      const typedDiffRows = Array.isArray((result.result_details as { diff_rows?: unknown } | undefined)?.diff_rows)
+        ? ((result.result_details as { diff_rows?: unknown }).diff_rows as MultiMarketCompareResponse["diff_table"])
+        : null;
       const diffRaw = Array.isArray(result.diff_table) ? result.diff_table : [];
       setMultiMarketResult({
         compare_id: String(result.compare_id ?? ""),
         baseline_market: String(result.baseline_market ?? ""),
-        strategy_spec: (result.strategy_spec && typeof result.strategy_spec === "object" ? result.strategy_spec : {}) as Record<string, unknown>,
+        strategy_spec: (result.strategy_spec && typeof result.strategy_spec === "object" ? result.strategy_spec : {}) as StrategySpec,
+        strategy_validation: (
+          result.strategy_validation && typeof result.strategy_validation === "object" ? result.strategy_validation : {}
+        ) as StrategyValidationResult,
+        strategy_compilation: (
+          result.strategy_compilation && typeof result.strategy_compilation === "object" ? result.strategy_compilation : {}
+        ) as StrategyCompilationPlan,
+        outcome_summary: (
+          result.outcome_summary && typeof result.outcome_summary === "object" ? result.outcome_summary : null
+        ) as MultiMarketCompareResponse["outcome_summary"],
+        result_details: (
+          result.result_details && typeof result.result_details === "object" ? result.result_details : null
+        ) as MultiMarketCompareResponse["result_details"],
         rows: rowsRaw as MultiMarketCompareResponse["rows"],
-        diff_table: diffRaw as MultiMarketCompareResponse["diff_table"],
+        diff_table: ((typedDiffRows as MultiMarketCompareResponse["diff_table"] | null) ?? diffRaw) as MultiMarketCompareResponse["diff_table"],
         parent_task_id: String(multiMarketTask.task_id),
         child_task_ids: [],
         migration_warnings: [],
@@ -183,7 +248,7 @@ export default function ReportsPage() {
   async function onRestore(traceId: string, runId: string) {
     setRestoringRunId(runId);
     try {
-      const bundle = await restoreTraceContext(traceId);
+      const bundle = await restoreTraceToResearchContext(traceId);
       const sessionId = bundle.session_state.session_id;
       router.push(`/chat?session_id=${encodeURIComponent(sessionId)}&restored_trace_id=${encodeURIComponent(traceId)}`);
     } finally {
@@ -299,7 +364,7 @@ export default function ReportsPage() {
           </TabsList>
 
           <TabsContent value="list">
-            {loadingCore ? (
+            {isRunsBootstrapPending ? (
               <div className="space-y-2">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <Skeleton key={i} className="h-12 w-full" />
@@ -425,28 +490,116 @@ export default function ReportsPage() {
             {!multiMarketResult ? (
               <EmptyState title="No multi-market comparison yet" description="Run comparison after selecting at least two markets." />
             ) : (
-              <Table>
-                <THead>
-                  <tr>
-                    <Th>Market</Th>
-                    <Th>Sharpe</Th>
-                    <Th>MDD</Th>
-                    <Th>Turnover</Th>
-                    <Th>Run</Th>
-                  </tr>
-                </THead>
-                <TBody>
-                  {multiMarketResult.diff_table.map((row, idx) => (
-                    <Tr key={`${String(row.market)}-${idx}`}>
-                      <Td>{String(row.market)}</Td>
-                      <Td>{String(row.sharpe)}</Td>
-                      <Td>{String(row.max_drawdown)}</Td>
-                      <Td>{String(row.turnover)}</Td>
-                      <Td><Link href={`/reports/${String(row.run_id)}`} className="text-primary underline">{String(row.run_id)}</Link></Td>
-                    </Tr>
-                  ))}
-                </TBody>
-              </Table>
+              <div className="space-y-3">
+                {(() => {
+                  const validation = multiMarketResult.strategy_validation;
+                  const compilation = multiMarketResult.strategy_compilation;
+                  return (
+                <div className="rounded-lg border p-3 text-xs text-muted-foreground">
+                  <p className="font-medium text-foreground">Base Strategy Spec</p>
+                  <p className="mt-1">
+                    {multiMarketResult.strategy_spec.strategy_family} / {multiMarketResult.strategy_spec.position_sizing} / {multiMarketResult.strategy_spec.rebalance}
+                  </p>
+                  <p className="mt-1">
+                    market={multiMarketResult.strategy_spec.market} | risk_budget={multiMarketResult.strategy_spec.risk_budget} | simulation_only={multiMarketResult.strategy_spec.simulation_only ? "true" : "false"}
+                  </p>
+                  {multiMarketResult.outcome_summary ? (
+                    <>
+                      <p className="mt-2">outcome: {multiMarketResult.outcome_summary.summary}</p>
+                      <p className="mt-1">
+                        best_sharpe={multiMarketResult.outcome_summary.best_market_by_sharpe ?? "n/a"} | worst_mdd={multiMarketResult.outcome_summary.worst_market_by_drawdown ?? "n/a"} | warnings={multiMarketResult.outcome_summary.warning_count}
+                      </p>
+                      {multiMarketResult.rows.some((row) => row.action_regime_details) ? (
+                        <p className="mt-1">
+                          typed_actions: {multiMarketResult.rows.map((row) => {
+                            const details = row.action_regime_details;
+                            return `${row.market} ra=${details?.risk_actions.length ?? 0}/rp=${details?.regime_periods.length ?? 0}`;
+                          }).join(" | ")}
+                        </p>
+                      ) : null}
+                      {multiMarketResult.rows.some((row) => row.control_optimizer_details) ? (
+                        <p className="mt-1">
+                          typed_controls: {multiMarketResult.rows.map((row) => {
+                            const details = row.control_optimizer_details;
+                            return `${row.market} ro=${details?.rejected_orders.length ?? 0}/cb=${details?.circuit_breaker_intervals.length ?? 0}/risk=${details?.risk_contribution_points.length ?? 0}`;
+                          }).join(" | ")}
+                        </p>
+                      ) : null}
+                      {multiMarketResult.rows.some((row) => row.control_action_deep_details) ? (
+                        <p className="mt-1">
+                          typed_deep_controls: {multiMarketResult.rows.map((row) => {
+                            const details = row.control_action_deep_details;
+                            return `${row.market} steps=${details?.optimizer_steps.length ?? 0}/cb_rule=${details?.circuit_breaker_state.rule_type ?? "n/a"}/peak_l1=${details?.budget_breakdown.peak_deviation_l1 ?? "n/a"}`;
+                          }).join(" | ")}
+                        </p>
+                      ) : null}
+                      {multiMarketResult.rows.some((row) => row.attribution_execution_details) ? (
+                        <p className="mt-1">
+                          typed_attribution_exec: {multiMarketResult.rows.map((row) => {
+                            const details = row.attribution_execution_details;
+                            return `${row.market} cost=${details?.cost_detail.total_cost ?? "n/a"}/fill=${details?.execution_style_detail.fill_rate ?? "n/a"}/top_instr=${details?.attribution_detail.top_instrument?.label ?? "n/a"}`;
+                          }).join(" | ")}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {validation && typeof validation.summary === "string" ? (
+                    <>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge variant={validationBadgeVariant(validation.status)}>
+                          {validation.status}
+                        </Badge>
+                        <Badge variant="muted">
+                          next={validation.next_output}
+                        </Badge>
+                        {compilation && typeof compilation.summary === "string" ? (
+                          <Badge variant="muted">
+                            overlays={compilation.overlays.length}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <p className="mt-2">{validation.summary}</p>
+                      {compilation && typeof compilation.summary === "string" ? (
+                        <>
+                          <p className="mt-2">compile: {compilation.summary}</p>
+                          {compilation.compilation_profile?.summary ? (
+                            <p className="mt-2">profile: {compilation.compilation_profile.summary}</p>
+                          ) : null}
+                          {compilation.compilation_policy?.summary ? (
+                            <p className="mt-2">policy: {compilation.compilation_policy.summary}</p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="mt-2">Validation unavailable for this comparison artifact.</p>
+                  )}
+                </div>
+                  );
+                })()}
+                <Table>
+                  <THead>
+                    <tr>
+                      <Th>Market</Th>
+                      <Th>Sharpe</Th>
+                      <Th>MDD</Th>
+                      <Th>Turnover</Th>
+                      <Th>Run</Th>
+                    </tr>
+                  </THead>
+                  <TBody>
+                    {(multiMarketResult.result_details?.diff_rows ?? multiMarketResult.diff_table).map((row, idx) => (
+                      <Tr key={`${String(row.market)}-${idx}`}>
+                        <Td>{String(row.market)}</Td>
+                        <Td>{String(row.sharpe)}</Td>
+                        <Td>{String(row.max_drawdown)}</Td>
+                        <Td>{String(row.turnover)}</Td>
+                        <Td><Link href={`/reports/${String(row.run_id)}`} className="text-primary underline">{String(row.run_id)}</Link></Td>
+                      </Tr>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
             )}
           </TabsContent>
 
@@ -481,23 +634,130 @@ export default function ReportsPage() {
             {!robustnessResult ? (
               <EmptyState title="No robustness report yet" description="Run robustness suite to generate variants." />
             ) : (
-              <div className="grid gap-2 md:grid-cols-4">
-                <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">Variant count</p>
-                  <p className="text-lg font-semibold">{robustnessResult.summary.variant_count}</p>
+              <div className="space-y-3">
+                {(() => {
+                  const validation = robustnessResult.base_strategy_validation;
+                  const compilation = robustnessResult.base_strategy_compilation;
+                  return (
+                <div className="rounded-lg border p-3 text-xs text-muted-foreground">
+                  {(() => {
+                    const evaluationPlan = parseEvaluationPlan(robustnessResult.base_backtest_request.evaluation_plan);
+                    return (
+                      <>
+                  <p className="font-medium text-foreground">Base Strategy vs Runtime Request</p>
+                  <p className="mt-1">
+                    spec={robustnessResult.base_strategy_spec.strategy_family}/{robustnessResult.base_strategy_spec.position_sizing}/{robustnessResult.base_strategy_spec.rebalance}
+                  </p>
+                  <p className="mt-1">
+                    execution_model={robustnessResult.base_backtest_request.execution_model} | eval_plan={evaluationPlan?.schema_version ?? "legacy"} | variants={robustnessResult.analysis_config.min_variants}-{robustnessResult.analysis_config.max_variants}
+                  </p>
+                  {evaluationPlan ? (
+                    <p className="mt-1">
+                      factor_lineage={evaluationPlan.factor_versions.length} | evidence_refs={evaluationPlan.evidence_refs.length} | request_profile={evaluationPlan.request_input_profile?.provenance_mode ?? "n/a"}
+                    </p>
+                  ) : null}
+                  {robustnessResult.outcome_summary ? (
+                    <>
+                      <p className="mt-2">outcome: {robustnessResult.outcome_summary.summary}</p>
+                      <p className="mt-1">
+                        worst_case_run={robustnessResult.outcome_summary.worst_case_run_id ?? "n/a"} | worst_case_source={robustnessResult.outcome_summary.worst_case_source_type ?? "n/a"}
+                      </p>
+                      {robustnessResult.outcome_summary.base_runtime_summary ? (
+                        <p className="mt-1">
+                          base_runtime={robustnessResult.outcome_summary.base_runtime_summary.summary}
+                        </p>
+                      ) : null}
+                      {robustnessResult.variants.some((row) => row.action_regime_details) ? (
+                        <p className="mt-1">
+                          typed_action_details={robustnessResult.variants.filter((row) => row.action_regime_details).length} variants | failure_variants={robustnessResult.variants.filter((row) => (row.action_regime_details?.failure_condition_events.length ?? 0) > 0).length}
+                        </p>
+                      ) : null}
+                      {robustnessResult.variants.some((row) => row.control_optimizer_details) ? (
+                        <p className="mt-1">
+                          typed_control_details={robustnessResult.variants.filter((row) => row.control_optimizer_details).length} variants | reject_variants={robustnessResult.variants.filter((row) => (row.control_optimizer_details?.rejected_orders.length ?? 0) > 0).length}
+                        </p>
+                      ) : null}
+                      {robustnessResult.variants.some((row) => row.control_action_deep_details) ? (
+                        <p className="mt-1">
+                          typed_deep_controls={robustnessResult.variants.filter((row) => row.control_action_deep_details).length} variants | cb_variants={robustnessResult.variants.filter((row) => (row.control_action_deep_details?.circuit_breaker_state.intervals.length ?? 0) > 0).length}
+                        </p>
+                      ) : null}
+                      {robustnessResult.variants.some((row) => row.attribution_execution_details) ? (
+                        <p className="mt-1">
+                          typed_attribution_exec={robustnessResult.variants.filter((row) => row.attribution_execution_details).length} variants | top_cost_variant={robustnessResult.variants.reduce<{ id: string; cost: number } | null>((best, row) => {
+                            const cost = Number(row.attribution_execution_details?.cost_detail.total_cost ?? -Infinity);
+                            if (!Number.isFinite(cost)) return best;
+                            if (!best || cost > best.cost) return { id: row.variant_id, cost };
+                            return best;
+                          }, null)?.id ?? "n/a"}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {validation && typeof validation.summary === "string" ? (
+                    <>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge variant={validationBadgeVariant(validation.status)}>
+                          {validation.status}
+                        </Badge>
+                        <Badge variant="muted">
+                          decision={validation.decision_status}
+                        </Badge>
+                        {compilation && typeof compilation.summary === "string" ? (
+                          <Badge variant="muted">
+                            overlays={compilation.overlays.length}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <p className="mt-2">{validation.summary}</p>
+                      {compilation && typeof compilation.summary === "string" ? (
+                        <>
+                          <p className="mt-2">compile: {compilation.summary}</p>
+                          {compilation.compilation_profile?.summary ? (
+                            <p className="mt-2">profile: {compilation.compilation_profile.summary}</p>
+                          ) : null}
+                          {compilation.compilation_policy?.summary ? (
+                            <p className="mt-2">policy: {compilation.compilation_policy.summary}</p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="mt-2">Validation unavailable for this robustness artifact.</p>
+                  )}
+                      </>
+                    );
+                  })()}
                 </div>
-                <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">Sharpe Std</p>
-                  <p className="text-lg font-semibold">{robustnessResult.summary.sharpe_std}</p>
+                  );
+                })()}
+                <div className="grid gap-2 md:grid-cols-4">
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Variant count</p>
+                    <p className="text-lg font-semibold">{robustnessResult.summary.variant_count}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Sharpe Std</p>
+                    <p className="text-lg font-semibold">{robustnessResult.summary.sharpe_std}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Worst MDD</p>
+                    <p className="text-lg font-semibold">{robustnessResult.summary.mdd_worst_case}</p>
+                  </div>
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs text-muted-foreground">Stability score</p>
+                    <p className="text-lg font-semibold">{robustnessResult.summary.stability_score}</p>
+                  </div>
                 </div>
-                <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">Worst MDD</p>
-                  <p className="text-lg font-semibold">{robustnessResult.summary.mdd_worst_case}</p>
-                </div>
-                <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">Stability score</p>
-                  <p className="text-lg font-semibold">{robustnessResult.summary.stability_score}</p>
-                </div>
+                {robustnessResult.result_details ? (
+                  <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">Typed result details</p>
+                    <p className="mt-1">{robustnessResult.result_details.summary}</p>
+                    <p className="mt-1">
+                      best_variant={robustnessResult.result_details.best_variant_id ?? "n/a"} | worst_variant={robustnessResult.result_details.worst_variant_id ?? "n/a"} | regimes={robustnessResult.result_details.regime_metric_count} | stress={robustnessResult.result_details.stress_metric_count}
+                    </p>
+                  </div>
+                ) : null}
               </div>
             )}
           </TabsContent>

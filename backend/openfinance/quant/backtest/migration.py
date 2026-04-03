@@ -4,6 +4,8 @@ from typing import Any
 from pydantic import BaseModel
 
 from openfinance.markets.rules_base import MarketRules
+from openfinance.research.strategy_decision import StrategyProposalSpec
+from openfinance.research.strategy_spec import StrategySpec
 
 
 class MigrationWarning(BaseModel):
@@ -15,15 +17,21 @@ class MigrationWarning(BaseModel):
 
 
 class MigrationChecker:
-    def check(self, strategy_spec: dict[str, Any], market: str, rules: MarketRules) -> list[MigrationWarning]:
+    def check(
+        self,
+        strategy_spec: dict[str, Any] | StrategySpec | StrategyProposalSpec,
+        market: str,
+        rules: MarketRules,
+    ) -> list[MigrationWarning]:
         market_key = str(market).upper()
         warnings: list[MigrationWarning] = []
+        payload = self._payload(strategy_spec)
 
-        family = str(strategy_spec.get("strategy_family", "")).lower()
-        rebalance = str(strategy_spec.get("rebalance", "weekly")).lower()
-        lookback_days = int(strategy_spec.get("lookback_days", 20) or 20)
-        auto_round_lot = bool(strategy_spec.get("auto_round_lot", True))
-        run_time_utc = str(strategy_spec.get("run_time_utc", "16:00"))
+        family = str(payload.get("strategy_family", "")).lower()
+        rebalance = str(payload.get("rebalance", "weekly")).lower()
+        lookback_days = int(payload.get("lookback_days", 20) or 20)
+        auto_round_lot = bool(payload.get("auto_round_lot", True))
+        run_time_utc = str(payload.get("run_time_utc", "16:00"))
 
         high_frequency = rebalance == "daily" or lookback_days <= 5 or any(
             token in family for token in ["intraday", "high_freq", "hft"]
@@ -43,7 +51,7 @@ class MigrationChecker:
 
         lot_size = float(rules.lot_size())
         supports_fractional = bool(rules.supports_fractional_qty())
-        probe_qty = self._probe_qty(strategy_spec)
+        probe_qty = self._probe_qty(payload)
         if (not supports_fractional) and lot_size > 0:
             remainder = abs(probe_qty) % lot_size
             mismatch = remainder > 1e-9 and abs(remainder - lot_size) > 1e-9
@@ -103,6 +111,11 @@ class MigrationChecker:
                 best = score
                 out = key
         return out
+
+    def _payload(self, strategy_spec: dict[str, Any] | StrategySpec | StrategyProposalSpec) -> dict[str, Any]:
+        if isinstance(strategy_spec, (StrategySpec, StrategyProposalSpec)):
+            return strategy_spec.model_dump(mode="json")
+        return dict(strategy_spec)
 
     def _probe_qty(self, strategy_spec: dict[str, Any]) -> float:
         max_position = float(strategy_spec.get("max_position", 0.12) or 0.12)

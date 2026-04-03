@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useWorkbenchShellActions } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,7 +21,7 @@ function formatPct(v: unknown): string {
 export default function DatasetDetailPage() {
   const params = useParams<{ datasetVersion: string }>();
   const datasetVersion = String(params.datasetVersion ?? "");
-  const { pushToast } = useWorkbench();
+  const { pushToast } = useWorkbenchShellActions();
   const [loading, setLoading] = useState(true);
   const [dataset, setDataset] = useState<DatasetEntry | null>(null);
 

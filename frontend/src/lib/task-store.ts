@@ -80,7 +80,11 @@ function isTerminal(status: string): boolean {
 type TaskStoreState = {
   tasksById: Record<string, TaskRecord>;
   activeTaskIdsBySession: Record<string, string[]>;
+  lastTaskListRefreshAt: string | null;
+  taskListRefreshing: boolean;
+  taskListError: string | null;
   replaceTasks: (tasks: TaskRecord[]) => void;
+  reconcileTasks: (tasks: TaskRecord[]) => void;
   upsertTask: (task: TaskRecord) => void;
   getTask: (taskId: string) => TaskRecord | undefined;
   listTasks: () => TaskRecord[];
@@ -89,6 +93,8 @@ type TaskStoreState = {
   listActiveTaskIds: (sessionId: string) => string[];
   listAllActiveTaskIds: () => string[];
   syncTaskTerminalState: (sessionId: string, taskId: string, status: string) => void;
+  setTaskListRefreshing: (next: boolean) => void;
+  setTaskListError: (message: string | null) => void;
 };
 
 export const useTaskStore = create<TaskStoreState>()(
@@ -96,6 +102,9 @@ export const useTaskStore = create<TaskStoreState>()(
     (set, get) => ({
       tasksById: {},
       activeTaskIdsBySession: {},
+      lastTaskListRefreshAt: null,
+      taskListRefreshing: false,
+      taskListError: null,
 
       replaceTasks: (tasks: TaskRecord[]) => {
         const nextMap: Record<string, TaskRecord> = {};
@@ -104,7 +113,25 @@ export const useTaskStore = create<TaskStoreState>()(
           if (!taskId) continue;
           nextMap[taskId] = normalizeTask(row);
         }
-        set({ tasksById: trimTaskMap(nextMap) });
+        set({
+          tasksById: trimTaskMap(nextMap),
+          lastTaskListRefreshAt: new Date().toISOString(),
+          taskListError: null,
+        });
+      },
+
+      reconcileTasks: (tasks: TaskRecord[]) => {
+        const nextMap = { ...get().tasksById };
+        for (const row of tasks) {
+          const taskId = String(row.task_id ?? "").trim();
+          if (!taskId) continue;
+          nextMap[taskId] = mergeTask(nextMap[taskId], row);
+        }
+        set({
+          tasksById: trimTaskMap(nextMap),
+          lastTaskListRefreshAt: new Date().toISOString(),
+          taskListError: null,
+        });
       },
 
       upsertTask: (task: TaskRecord) => {
@@ -164,6 +191,14 @@ export const useTaskStore = create<TaskStoreState>()(
       syncTaskTerminalState: (sessionId: string, taskId: string, status: string) => {
         if (!isTerminal(String(status ?? ""))) return;
         get().removeActiveTask(sessionId, taskId);
+      },
+
+      setTaskListRefreshing: (next) => {
+        set({ taskListRefreshing: next });
+      },
+
+      setTaskListError: (message) => {
+        set({ taskListError: message });
       },
     }),
     {

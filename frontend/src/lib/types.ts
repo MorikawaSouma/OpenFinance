@@ -57,18 +57,258 @@ export type CircuitBreakerSpec = {
   rule: CircuitBreakerRule;
 };
 
-export type StrategyDetail = {
+export type StrategyProposalSpec = {
+  strategy_family: string;
+  rebalance: string;
+  lookback_days: number;
+  signal_threshold: number;
+  position_sizing: string;
+  risk_budget: string;
+  max_position: number;
+  leverage_limit: number;
+  auto_round_lot: boolean;
+  run_time_utc: string;
+};
+
+export type StrategyDecisionCandidate = {
+  name: string;
+  spec: StrategyProposalSpec;
+  pros: string[];
+  cons: string[];
+  risks: string[];
+  expected_failure_regimes: string[];
+  cost_profile: string;
+  why_not_selected: string;
+};
+
+export type StrategyDecisionSelected = {
+  name: string;
+  spec: StrategyProposalSpec;
+  rationale: string;
+  tradeoff_summary: string;
+};
+
+export type StrategyDecision = {
+  schema_version: string;
+  candidates: StrategyDecisionCandidate[];
+  selected: StrategyDecisionSelected;
+  llm_mode: string;
+};
+
+export type StrategyValidationCheck = {
+  check_id: "spec_fields" | "decision_alignment" | "evidence_linkage" | "compile_boundary" | string;
+  status: "ok" | "warn" | "invalid" | string;
+  detail: string;
+};
+
+export type StrategyValidationResult = {
+  schema_version: string;
+  validated_object: "strategy_spec" | string;
   strategy_id: string;
   strategy_version: string;
   market: string;
+  status: "ok" | "warn" | "invalid" | string;
+  compile_ready: boolean;
+  decision_status: "aligned" | "not_provided" | "mismatch" | string;
+  selected_candidate?: string | null;
+  next_output: "BacktestRequest" | string;
+  summary: string;
+  checks: StrategyValidationCheck[];
+  evidence_refs: string[];
+};
+
+export type CompilationInputClassification =
+  | "user_configurable"
+  | "environment_bound"
+  | "runtime_derived"
+  | "validation_required_override"
+  | string;
+
+export type CompilationConfiguredBy =
+  | "strategy_spec"
+  | "strategy_decision"
+  | "user_request"
+  | "prepared_dataset"
+  | "system_environment"
+  | "runtime_pipeline"
+  | "validation_artifact"
+  | string;
+
+export type CompilationValidatedBy =
+  | "strategy_validation"
+  | "compilation_profile"
+  | "not_applicable"
+  | string;
+
+export type CompilationPolicyOutcome = "allowed" | "allowed_with_warning" | "blocked" | string;
+
+export type CompilationPolicyCheckedBy =
+  | "compilation_profile"
+  | "migration_checker"
+  | "backtest_runtime"
+  | string;
+
+export type CompilationPolicyFactSource =
+  | "compilation_profile.override_policies"
+  | "backtest_runner.supported_execution_models"
+  | "market_rules_provider"
+  | "migration_checker.warning_codes"
+  | string;
+
+export type StrategyCompilationInputPolicy = {
+  output_path: string;
+  classification: CompilationInputClassification;
+  configured_by: CompilationConfiguredBy;
+  validated_by: CompilationValidatedBy;
+  source_kind?: string | null;
+  source_path: string;
+  rationale: string;
+};
+
+export type CompilationOverridePolicy = {
+  output_path: string;
+  classification: CompilationInputClassification;
+  configured_by: CompilationConfiguredBy;
+  source_kind: string;
+  source_path: string;
+  requires_additional_validation: boolean;
+  rationale: string;
+};
+
+export type StrategyCompilationProfile = {
+  schema_version: string;
+  profile_id: string;
+  executable_object: "BacktestRequest" | string;
+  summary: string;
+  input_policies: StrategyCompilationInputPolicy[];
+  override_policies: CompilationOverridePolicy[];
+};
+
+export type StrategyCompilationPolicyCheck = {
+  rule_id: string;
+  code: string;
+  output_path: string;
+  classification: CompilationInputClassification;
+  configured_by: CompilationConfiguredBy;
+  outcome: CompilationPolicyOutcome;
+  checked_by: CompilationPolicyCheckedBy;
+  fact_source: CompilationPolicyFactSource;
+  requires_additional_validation: boolean;
+  detail: string;
+};
+
+export type StrategyCompilationPolicyResult = {
+  schema_version: string;
+  checked_object: "strategy_compilation_profile" | string;
+  rule_surface_schema_version: string;
+  rule_surface_id: string;
+  market: string;
+  environment: "backtest" | string;
+  status: CompilationPolicyOutcome;
+  compile_ready: boolean;
+  summary: string;
+  warning_count: number;
+  blocked_count: number;
+  checks: StrategyCompilationPolicyCheck[];
+};
+
+export type StrategyBacktestRequestInputProfile = {
+  schema_version: string;
+  profile_id: string;
+  executable_object: "BacktestRequest" | string;
+  provenance_mode: string;
+  dataset_binding_source: string;
+  window_source: string;
+  execution_model_source: string;
+  run_time_utc_source: string;
+  cost_model_source: string;
+  constraints_source: string;
+  factor_versions_source: string;
+  evaluation_plan_source: string;
+  summary: string;
+};
+
+export type StrategyCompilationBinding = {
+  output_path: string;
+  value: unknown;
+  source_kind:
+    | "strategy_spec"
+    | "strategy_spec.constraints"
+    | "strategy_decision.selected"
+    | "strategy_validation"
+    | "runtime_request"
+    | "default"
+    | string;
+  source_path: string;
+  note: string;
+};
+
+export type StrategyCompilationOverlay = {
+  output_path: string;
+  final_value: unknown;
+  source_kind:
+    | "strategy_spec"
+    | "strategy_spec.constraints"
+    | "strategy_decision.selected"
+    | "strategy_validation"
+    | "runtime_request"
+    | "default"
+    | string;
+  source_path: string;
+  overridden_source_kind?: string | null;
+  overridden_source_path?: string | null;
+  overridden_value?: unknown;
+  rationale: string;
+};
+
+export type StrategyCompilationPlan = {
+  schema_version: string;
+  strategy_id: string;
+  strategy_version: string;
+  market: string;
+  executable_object: "BacktestRequest" | string;
+  compile_ready: boolean;
+  validation_status: "ok" | "warn" | "invalid" | string;
+  decision_status: "aligned" | "not_provided" | "mismatch" | string;
+  selected_candidate?: string | null;
+  summary: string;
+  bindings: StrategyCompilationBinding[];
+  overlays: StrategyCompilationOverlay[];
+  evidence_refs: string[];
+  compilation_profile?: StrategyCompilationProfile | null;
+  compilation_policy?: StrategyCompilationPolicyResult | null;
+};
+
+export type StrategySpec = {
+  schema_version: string;
+  strategy_id: string;
+  strategy_version: string;
+  plan_id?: string | null;
+  experiment_id?: string | null;
+  market: string;
+  strategy_family: string;
   rebalance: string;
-  strategy_family?: string;
-  lookback_days?: number;
-  risk_budget?: string;
-  risk_constraints: Record<string, unknown>;
+  lookback_days: number;
+  signal_threshold: number;
+  position_sizing: string;
+  risk_budget: string;
+  max_position: number;
+  stop_loss: number;
+  leverage_limit: number;
+  factor_weights: Record<string, number>;
+  constraints: Record<string, unknown>;
   circuit_breaker: CircuitBreakerSpec;
   failure_regimes: string[];
+  rationale: string;
+  evidence_refs: string[];
+  simulation_only: boolean;
+};
+
+export type StrategyDetail = {
+  source: "strategy_registry" | "run_registry_fallback" | "placeholder";
+  created_at?: string | null;
   notes: string;
+  spec: StrategySpec;
 };
 
 export type FactorSummary = {
@@ -175,11 +415,17 @@ export type BacktestReport = {
   dataset_version: string;
   market?: string;
   strategy_version: string;
-  strategy_decision?: Record<string, unknown>;
-  factor_versions: Array<{
-    factor_id: string;
-    version: string;
-  }>;
+  strategy_decision?: StrategyDecision | null;
+  strategy_validation?: StrategyValidationResult | null;
+  strategy_compilation?: StrategyCompilationPlan | null;
+  strategy_trace?: StrategyTraceArtifact | null;
+  runtime_summary?: StrategyRuntimeOutcomeSummary | null;
+  runtime_diagnostics?: StrategyRuntimeDiagnosticsResult | null;
+  action_regime_details?: StrategyRuntimeActionRegimeDetails | null;
+  attribution_execution_details?: StrategyRuntimeAttributionExecutionDetails | null;
+  control_optimizer_details?: StrategyRuntimeControlOptimizerDetails | null;
+  control_action_deep_details?: StrategyRuntimeControlActionDeepDetails | null;
+  factor_versions: FactorVersionRef[];
   factor_versions_reason?: string | null;
   audit_trace_id: string;
   created_at: string;
@@ -240,6 +486,490 @@ export type BacktestReport = {
     instrument_pnl_contrib?: Record<string, number>;
     sector_pnl_contrib?: Record<string, number>;
   };
+};
+
+export type FactorVersionRef = {
+  factor_id: string;
+  version: string;
+};
+
+export type BacktestCostModel = {
+  commission_bps: number;
+  slippage_bps: number;
+};
+
+export type BacktestEvaluationWindow = {
+  start: string;
+  end: string;
+};
+
+export type BacktestEvaluationPlan = {
+  schema_version: string;
+  window?: BacktestEvaluationWindow | null;
+  stress: string[];
+  seed?: number | null;
+  evidence_pack_id?: string | null;
+  evidence_refs: string[];
+  factor_id?: string | null;
+  factor_version?: string | null;
+  factor_versions: FactorVersionRef[];
+  factor_artifact_path?: string | null;
+  failure_conditions: unknown[];
+  no_factor_strategy?: boolean | null;
+  strategy_decision?: StrategyDecision | null;
+  strategy_validation?: StrategyValidationResult | null;
+  strategy_compilation?: StrategyCompilationPlan | null;
+  request_input_profile?: StrategyBacktestRequestInputProfile | null;
+  meta_variant_id?: string | null;
+  meta_group?: string | null;
+  [key: string]: unknown;
+};
+
+export type StrategyFactorLineageSummary = {
+  factor_versions: FactorVersionRef[];
+  reason?: string | null;
+};
+
+export type StrategyTraceArtifact = {
+  schema_version: string;
+  trace_object: "BacktestReport" | "BacktestRequest" | string;
+  strategy_decision?: StrategyDecision | null;
+  strategy_validation?: StrategyValidationResult | null;
+  strategy_compilation?: StrategyCompilationPlan | null;
+  evaluation_plan?: BacktestEvaluationPlan | null;
+  factor_lineage: StrategyFactorLineageSummary;
+  summary: string;
+};
+
+export type StrategyRuntimeMetricSnapshot = {
+  total_return?: number | null;
+  sharpe?: number | null;
+  max_drawdown?: number | null;
+  volatility?: number | null;
+  trade_count?: number | null;
+  turnover?: number | null;
+  cost_drag?: number | null;
+  reject_count?: number | null;
+  risk_scale?: number | null;
+};
+
+export type StrategyRuntimeOutcomeSummary = {
+  schema_version: string;
+  summary_object: "BacktestReport" | "MarketCompareRow" | "RestoreReportHeader" | "RobustnessBase" | string;
+  run_id?: string | null;
+  dataset_version: string;
+  market: string;
+  strategy_version: string;
+  metrics: StrategyRuntimeMetricSnapshot;
+  compile_ready?: boolean | null;
+  factor_lineage_count: number;
+  evidence_ref_count: number;
+  warning_count: number;
+  highest_warning_severity?: string | null;
+  summary: string;
+};
+
+export type StrategyCompareOutcomeSummary = {
+  schema_version: string;
+  summary_object: "MultiMarketCompareResponse" | string;
+  compare_id: string;
+  baseline_market: string;
+  market_count: number;
+  warning_count: number;
+  best_market_by_sharpe?: string | null;
+  worst_market_by_drawdown?: string | null;
+  rows: StrategyRuntimeOutcomeSummary[];
+  summary: string;
+};
+
+export type StrategyRobustnessOutcomeSummary = {
+  schema_version: string;
+  summary_object: "RobustnessReport" | string;
+  robustness_id: string;
+  market: string;
+  variant_count: number;
+  sharpe_std: number;
+  mdd_worst_case: number;
+  stability_score: number;
+  worst_case_source_type?: string | null;
+  worst_case_run_id?: string | null;
+  base_runtime_summary?: StrategyRuntimeOutcomeSummary | null;
+  summary: string;
+};
+
+export type StrategyRuntimeCostModelSummary = {
+  commission_bps?: number | null;
+  slippage_bps?: number | null;
+};
+
+export type StrategyRuntimeMarketRulesSummary = {
+  market: string;
+  t_plus_one?: boolean | null;
+  lot_size?: number | null;
+  supports_fractional_qty?: boolean | null;
+  min_notional?: number | null;
+  is_24x7?: boolean | null;
+};
+
+export type StrategyRuntimeRiskManagementSummary = {
+  regime_vol_window?: number | null;
+  regime_vol_threshold?: number | null;
+  regime_exposure_scale_high_vol?: number | null;
+  regime_pause_new_positions?: boolean | null;
+  drawdown_limit?: number | null;
+  stop_trading_triggered?: boolean | null;
+  failure_condition_block_triggered?: boolean | null;
+  circuit_breaker_enabled?: boolean | null;
+  circuit_breaker_trigger_count: number;
+};
+
+export type StrategyRuntimePortfolioOptimizationSummary = {
+  optimizer?: string | null;
+  optimizer_universe_size: number;
+  covariance_window?: number | null;
+  max_position_weight?: number | null;
+  max_gross_leverage?: number | null;
+  max_sector_exposure?: number | null;
+  sector_neutral?: boolean | null;
+};
+
+export type StrategyRuntimeBudgetDeviationSummary = {
+  mean_l1?: number | null;
+  max_l1?: number | null;
+  observations: number;
+};
+
+export type StrategyRuntimeActionCounts = {
+  risk_action_count: number;
+  risk_actions_by_type: Record<string, number>;
+  constraint_action_count: number;
+  constraint_actions_by_type: Record<string, number>;
+  optimizer_diagnostic_count: number;
+  rejected_order_count: number;
+  failure_event_count: number;
+  regime_period_count: number;
+};
+
+export type StrategyRuntimeDiagnosticsResult = {
+  schema_version: string;
+  diagnostics_object: "BacktestReport" | "RestoreReportHeader" | string;
+  execution_model: string;
+  cost_model: StrategyRuntimeCostModelSummary;
+  market_rules: StrategyRuntimeMarketRulesSummary;
+  risk_management: StrategyRuntimeRiskManagementSummary;
+  portfolio_optimization: StrategyRuntimePortfolioOptimizationSummary;
+  budget_deviation: StrategyRuntimeBudgetDeviationSummary;
+  action_counts: StrategyRuntimeActionCounts;
+  notes?: string | null;
+  summary: string;
+};
+
+export type StrategyRuntimeRiskAction = {
+  time?: string | null;
+  action: string;
+  detail?: string | null;
+};
+
+export type StrategyRuntimeConstraintAction = {
+  time?: string | null;
+  optimizer?: string | null;
+  symbol?: string | null;
+  action: string;
+  detail?: string | null;
+  instrument?: string | null;
+  sector?: string | null;
+  before?: number | null;
+  after?: number | null;
+  before_gross?: number | null;
+  after_gross?: number | null;
+  net_before?: number | null;
+  net_after?: number | null;
+};
+
+export type StrategyRuntimeFailureConditionEvent = {
+  time?: string | null;
+  code: string;
+  level: string;
+  message: string;
+  metric_keys: string[];
+};
+
+export type StrategyRuntimeRegimePeriod = {
+  regime: string;
+  start?: string | null;
+  end?: string | null;
+  trigger?: string | null;
+};
+
+export type StrategyRuntimeActionRegimeDetails = {
+  schema_version: string;
+  detail_object: "BacktestReport" | "MarketCompareRow" | "RobustnessVariant" | "RestoreReportHeader" | string;
+  risk_actions: StrategyRuntimeRiskAction[];
+  constraint_actions: StrategyRuntimeConstraintAction[];
+  failure_condition_events: StrategyRuntimeFailureConditionEvent[];
+  regime_periods: StrategyRuntimeRegimePeriod[];
+  summary: string;
+};
+
+export type StrategyRuntimeRejectedOrder = {
+  time?: string | null;
+  instrument?: string | null;
+  side?: string | null;
+  qty?: number | null;
+  reason?: string | null;
+  reason_code?: string | null;
+  user_friendly_msg?: string | null;
+  reason_msg?: string | null;
+};
+
+export type StrategyRuntimeOptimizerDiagnostic = {
+  time?: string | null;
+  optimizer?: string | null;
+  symbol?: string | null;
+  signal?: number | null;
+  raw_target_exposure?: number | null;
+  optimized_weight?: number | null;
+  gross_target?: number | null;
+  budget_deviation_l1?: number | null;
+  asset_count: number;
+};
+
+export type StrategyRuntimeCircuitBreakerInterval = {
+  start?: string | null;
+  end?: string | null;
+  reason?: string | null;
+};
+
+export type StrategyRuntimeBudgetDetail = {
+  mean_l1?: number | null;
+  max_l1?: number | null;
+  observations: number;
+  latest_time?: string | null;
+  latest_deviation_l1?: number | null;
+  latest_target_budget: Record<string, number>;
+  latest_achieved_budget: Record<string, number>;
+};
+
+export type StrategyRuntimeRiskContributionPoint = {
+  time?: string | null;
+  deviation_l1?: number | null;
+  target_budget: Record<string, number>;
+  achieved_budget: Record<string, number>;
+  weights: Record<string, number>;
+};
+
+export type StrategyRuntimeControlOptimizerDetails = {
+  schema_version: string;
+  detail_object: "BacktestReport" | "MarketCompareRow" | "RobustnessVariant" | "RestoreReportHeader" | string;
+  rejected_orders: StrategyRuntimeRejectedOrder[];
+  optimizer_diagnostics: StrategyRuntimeOptimizerDiagnostic[];
+  circuit_breaker_intervals: StrategyRuntimeCircuitBreakerInterval[];
+  budget_detail: StrategyRuntimeBudgetDetail;
+  risk_contribution_points: StrategyRuntimeRiskContributionPoint[];
+  summary: string;
+};
+
+export type StrategyRuntimeOptimizerStepDeepDetail = {
+  time?: string | null;
+  optimizer?: string | null;
+  method?: string | null;
+  asset_count: number;
+  assets: string[];
+  budget_deviation_l1?: number | null;
+  loss_final?: number | null;
+  raw_weights: Record<string, number>;
+  target_budget: Record<string, number>;
+  achieved_budget: Record<string, number>;
+  direction: Record<string, number>;
+  covariance_asset_count: number;
+};
+
+export type StrategyRuntimeCircuitBreakerExecutionSupport = {
+  drawdown?: boolean | null;
+  consecutive_losses?: boolean | null;
+  vol_spike?: boolean | null;
+};
+
+export type StrategyRuntimeCircuitBreakerIntervalState = {
+  start?: string | null;
+  end?: string | null;
+  reason?: string | null;
+  rule_type?: string | null;
+  threshold?: number | null;
+  supported?: boolean | null;
+};
+
+export type StrategyRuntimeCircuitBreakerState = {
+  enabled?: boolean | null;
+  rule_type?: string | null;
+  threshold?: number | null;
+  trigger_count: number;
+  stop_trading_triggered?: boolean | null;
+  execution_support: StrategyRuntimeCircuitBreakerExecutionSupport;
+  intervals: StrategyRuntimeCircuitBreakerIntervalState[];
+};
+
+export type StrategyRuntimeBudgetBreakdown = {
+  mean_l1?: number | null;
+  max_l1?: number | null;
+  observations: number;
+  latest_time?: string | null;
+  latest_deviation_l1?: number | null;
+  latest_gap_by_asset: Record<string, number>;
+  peak_time?: string | null;
+  peak_deviation_l1?: number | null;
+  peak_gap_by_asset: Record<string, number>;
+};
+
+export type StrategyRuntimeRiskContributionSnapshot = {
+  time?: string | null;
+  deviation_l1?: number | null;
+  target_budget: Record<string, number>;
+  achieved_budget: Record<string, number>;
+  weights: Record<string, number>;
+  gap_by_asset: Record<string, number>;
+};
+
+export type StrategyRuntimeRiskContributionBreakdown = {
+  point_count: number;
+  latest?: StrategyRuntimeRiskContributionSnapshot | null;
+  peak?: StrategyRuntimeRiskContributionSnapshot | null;
+};
+
+export type StrategyRuntimeControlActionDeepDetails = {
+  schema_version: string;
+  detail_object: "BacktestReport" | "MarketCompareRow" | "RobustnessVariant" | "RestoreReportHeader" | string;
+  optimizer_steps: StrategyRuntimeOptimizerStepDeepDetail[];
+  circuit_breaker_state: StrategyRuntimeCircuitBreakerState;
+  budget_breakdown: StrategyRuntimeBudgetBreakdown;
+  risk_contribution_breakdown: StrategyRuntimeRiskContributionBreakdown;
+  summary: string;
+};
+
+export type StrategyRuntimeCostDetail = {
+  commission_sum?: number | null;
+  slippage_sum?: number | null;
+  total_cost?: number | null;
+  trade_count: number;
+  order_count: number;
+  avg_total_cost_per_trade?: number | null;
+  avg_total_cost_per_order?: number | null;
+  cost_drag?: number | null;
+};
+
+export type StrategyRuntimeAttributionRow = {
+  label: string;
+  pnl: number;
+  abs_share?: number | null;
+};
+
+export type StrategyRuntimeAttributionDetail = {
+  instrument_rows: StrategyRuntimeAttributionRow[];
+  sector_rows: StrategyRuntimeAttributionRow[];
+  instrument_count: number;
+  sector_count: number;
+  top_instrument?: StrategyRuntimeAttributionRow | null;
+  worst_instrument?: StrategyRuntimeAttributionRow | null;
+  top_sector?: StrategyRuntimeAttributionRow | null;
+  worst_sector?: StrategyRuntimeAttributionRow | null;
+};
+
+export type StrategyRuntimeExecutionStyleDetail = {
+  execution_model?: string | null;
+  order_count: number;
+  filled_order_count: number;
+  rejected_order_count: number;
+  queued_order_count: number;
+  trade_count: number;
+  buy_trade_count: number;
+  sell_trade_count: number;
+  fill_rate?: number | null;
+  avg_trade_qty?: number | null;
+  order_status_counts: Record<string, number>;
+  reject_reason_counts: Record<string, number>;
+  dominant_reject_reason?: string | null;
+};
+
+export type StrategyRuntimeAttributionExecutionDetails = {
+  schema_version: string;
+  detail_object: "BacktestReport" | "MarketCompareRow" | "RobustnessVariant" | "RestoreReportHeader" | string;
+  cost_detail: StrategyRuntimeCostDetail;
+  attribution_detail: StrategyRuntimeAttributionDetail;
+  execution_style_detail: StrategyRuntimeExecutionStyleDetail;
+  summary: string;
+};
+
+export type StrategyCompareDiffRow = {
+  market: string;
+  run_id: string;
+  dataset_version: string;
+  sharpe?: number | null;
+  max_drawdown?: number | null;
+  turnover?: number | null;
+  reject_count?: number | null;
+  cost_drag?: number | null;
+  sharpe_diff_vs_baseline?: number | null;
+  max_drawdown_diff_vs_baseline?: number | null;
+  turnover_diff_vs_baseline?: number | null;
+  warning_count: number;
+  highest_warning_severity?: string | null;
+};
+
+export type StrategyCompareWarningSummary = {
+  market: string;
+  warning_count: number;
+  highest_warning_severity?: string | null;
+  warning_codes: string[];
+};
+
+export type StrategyCompareResultDetails = {
+  schema_version: string;
+  result_object: "MultiMarketCompareResponse" | string;
+  compare_id: string;
+  baseline_market: string;
+  diff_rows: StrategyCompareDiffRow[];
+  warning_summaries: StrategyCompareWarningSummary[];
+  summary: string;
+};
+
+export type StrategyRobustnessVariantResultRow = {
+  variant_id: string;
+  group: string;
+  scenario: string;
+  run_id: string;
+  commission_bps?: number | null;
+  slippage_bps?: number | null;
+  sharpe?: number | null;
+  max_drawdown?: number | null;
+  total_return?: number | null;
+  cost_drag?: number | null;
+  turnover?: number | null;
+};
+
+export type StrategyRobustnessResultDetails = {
+  schema_version: string;
+  result_object: "RobustnessReport" | string;
+  robustness_id: string;
+  variant_rows: StrategyRobustnessVariantResultRow[];
+  regime_metric_count: number;
+  stress_metric_count: number;
+  best_variant_id?: string | null;
+  worst_variant_id?: string | null;
+  summary: string;
+};
+
+export type BacktestRequest = {
+  dataset_version: string;
+  strategy_id: string;
+  strategy_version: string;
+  market: string;
+  start: string;
+  end: string;
+  execution_model: string;
+  cost_model: BacktestCostModel;
+  factor_versions: FactorVersionRef[];
+  constraints: Record<string, unknown>;
+  evaluation_plan: BacktestEvaluationPlan | Record<string, unknown>;
 };
 
 export type RiskStatus = {
@@ -498,9 +1228,11 @@ export type ExperimentResult = {
   dataset_version: string;
   objective_score: number;
   metrics: Record<string, number | string>;
-  strategy_spec: Record<string, unknown>;
-  strategy_decision: Record<string, unknown>;
-  backtest_request: Record<string, unknown>;
+  strategy_spec: StrategySpec;
+  strategy_decision: StrategyDecision | null;
+  strategy_validation: StrategyValidationResult;
+  strategy_compilation: StrategyCompilationPlan;
+  backtest_request: BacktestRequest;
   why_selected: string;
 };
 
@@ -516,8 +1248,10 @@ export type PipelineResponse = {
   dataset_version: string;
   run_id: string;
   backtest_metrics: Record<string, number | string>;
-  strategy_config: Record<string, unknown>;
-  strategy_decision: Record<string, unknown>;
+  strategy_spec: StrategySpec;
+  strategy_decision: StrategyDecision | null;
+  strategy_validation: StrategyValidationResult;
+  strategy_compilation: StrategyCompilationPlan;
   risk_explanation: string;
   research_plan: ResearchPlan;
   experiments: ExperimentResult[];
@@ -568,6 +1302,10 @@ export type MultiMarketCompareRow = {
   dataset_version: string;
   strategy_version: string;
   metrics: Record<string, number | string>;
+  action_regime_details?: StrategyRuntimeActionRegimeDetails | null;
+  attribution_execution_details?: StrategyRuntimeAttributionExecutionDetails | null;
+  control_optimizer_details?: StrategyRuntimeControlOptimizerDetails | null;
+  control_action_deep_details?: StrategyRuntimeControlActionDeepDetails | null;
 };
 
 export type MigrationWarning = {
@@ -581,7 +1319,11 @@ export type MigrationWarning = {
 export type MultiMarketCompareResponse = {
   compare_id: string;
   baseline_market: string;
-  strategy_spec: Record<string, unknown>;
+  strategy_spec: StrategySpec;
+  strategy_validation: StrategyValidationResult;
+  strategy_compilation: StrategyCompilationPlan;
+  outcome_summary?: StrategyCompareOutcomeSummary | null;
+  result_details?: StrategyCompareResultDetails | null;
   rows: MultiMarketCompareRow[];
   diff_table: Array<Record<string, number | string>>;
   parent_task_id?: string | null;
@@ -626,6 +1368,10 @@ export type RobustnessVariant = {
   slippage_bps: number;
   constraints: Record<string, unknown>;
   metrics: Record<string, number | string>;
+  action_regime_details?: StrategyRuntimeActionRegimeDetails | null;
+  attribution_execution_details?: StrategyRuntimeAttributionExecutionDetails | null;
+  control_optimizer_details?: StrategyRuntimeControlOptimizerDetails | null;
+  control_action_deep_details?: StrategyRuntimeControlActionDeepDetails | null;
 };
 
 export type RobustnessSummary = {
@@ -672,6 +1418,20 @@ export type WorstCaseSummary = {
   explanation: string;
 };
 
+export type RobustnessAnalysisConfig = {
+  cost_multipliers: number[];
+  lookback_values?: number[] | null;
+  threshold_values?: number[] | null;
+  rebalance_values?: string[] | null;
+  min_variants: number;
+  max_variants: number;
+  regime_vol_window: number;
+  stress_shock_return: number;
+  stress_vol_multiplier: number;
+  base_constraints: Record<string, unknown>;
+  base_cost_model: Record<string, number>;
+};
+
 export type RobustnessReport = {
   robustness_id: string;
   dataset_version: string;
@@ -688,7 +1448,13 @@ export type RobustnessReport = {
   regime_metrics: RegimeMetric[];
   stress_metrics: StressMetric[];
   worst_case_summary: WorstCaseSummary;
-  base_spec: Record<string, unknown>;
+  outcome_summary?: StrategyRobustnessOutcomeSummary | null;
+  result_details?: StrategyRobustnessResultDetails | null;
+  base_strategy_spec: StrategySpec;
+  base_strategy_validation: StrategyValidationResult;
+  base_strategy_compilation: StrategyCompilationPlan;
+  base_backtest_request: BacktestRequest;
+  analysis_config: RobustnessAnalysisConfig;
 };
 
 export type SseEvent = {
@@ -709,7 +1475,13 @@ export type RestoreReportHeader = {
   market: string;
   start: string;
   end: string;
-  factor_versions: Array<Record<string, string>>;
+  factor_versions: FactorVersionRef[];
+  runtime_summary?: StrategyRuntimeOutcomeSummary | null;
+  runtime_diagnostics?: StrategyRuntimeDiagnosticsResult | null;
+  action_regime_details?: StrategyRuntimeActionRegimeDetails | null;
+  attribution_execution_details?: StrategyRuntimeAttributionExecutionDetails | null;
+  control_optimizer_details?: StrategyRuntimeControlOptimizerDetails | null;
+  control_action_deep_details?: StrategyRuntimeControlActionDeepDetails | null;
   metrics: Record<string, unknown>;
   created_at?: string | null;
   report_path?: string | null;
@@ -720,6 +1492,7 @@ export type RestoreBacktestRequest = {
   run_id?: string | null;
   request: Record<string, unknown>;
   source: string;
+  strategy_trace?: StrategyTraceArtifact | null;
 };
 
 export type RestoreBundle = {

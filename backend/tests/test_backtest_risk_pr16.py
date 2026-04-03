@@ -70,6 +70,15 @@ def test_high_vol_regime_triggers_risk_actions(tmp_path: Path) -> None:
     assert len(regime_periods) >= 1
     assert any(action.get("action") == "regime_enter_high_vol" for action in risk_actions if isinstance(action, dict))
     assert any(action.get("action") == "regime_exposure_scaled" for action in risk_actions if isinstance(action, dict))
+    assert report.action_regime_details is not None
+    assert report.action_regime_details.schema_version == "strategy_runtime_action_regime.v1"
+    assert len(report.action_regime_details.regime_periods) >= 1
+    assert any(action.action == "regime_enter_high_vol" for action in report.action_regime_details.risk_actions)
+    assert any(action.action == "regime_exposure_scaled" for action in report.action_regime_details.risk_actions)
+    assert report.control_optimizer_details is not None
+    assert report.control_optimizer_details.schema_version == "strategy_runtime_control_optimizer.v1"
+    assert report.control_action_deep_details is not None
+    assert report.control_action_deep_details.schema_version == "strategy_runtime_control_action_deep.v1"
 
 
 def test_drawdown_circuit_breaker_stops_trading_and_audits(tmp_path: Path) -> None:
@@ -123,5 +132,18 @@ def test_drawdown_circuit_breaker_stops_trading_and_audits(tmp_path: Path) -> No
     assert isinstance(intervals, list) and len(intervals) >= 1
     assert intervals[0].get("start")
     assert intervals[0].get("end")
+    assert report.action_regime_details is not None
+    assert report.action_regime_details.schema_version == "strategy_runtime_action_regime.v1"
+    assert any(
+        action.action in {"drawdown_circuit_breaker_flatten", "circuit_breaker_stop_trading"}
+        for action in report.action_regime_details.risk_actions
+    )
+    assert report.control_optimizer_details is not None
+    assert report.control_optimizer_details.schema_version == "strategy_runtime_control_optimizer.v1"
+    assert len(report.control_optimizer_details.circuit_breaker_intervals) >= 1
+    assert report.control_action_deep_details is not None
+    assert report.control_action_deep_details.schema_version == "strategy_runtime_control_action_deep.v1"
+    assert report.control_action_deep_details.circuit_breaker_state.rule_type == "drawdown"
+    assert len(report.control_action_deep_details.circuit_breaker_state.intervals) >= 1
     audit_rows = audit_store.list_all()
     assert any(row.event_type == "backtest.risk.action" for row in audit_rows)

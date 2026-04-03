@@ -6,15 +6,45 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from openfinance.api.routes_chat import _chat_store
 from openfinance.core.audit import AuditLogEntry, FileAuditStore
 from openfinance.core.config import settings
 from openfinance.core.events import event_bus
 from openfinance.knowledge.service import KnowledgeService, build_default_knowledge_service
-from openfinance.quant.backtest.report import BacktestReport
+from openfinance.quant.backtest.evaluation_plan import FactorVersionRef, parse_backtest_evaluation_plan
+from openfinance.quant.backtest.report import BacktestReport, BacktestRequest
 from openfinance.quant.backtest.run_registry import RunRegistry, RunRegistryEntry
+from openfinance.quant.backtest.strategy_runtime_action_regime import (
+    StrategyRuntimeActionRegimeDetails,
+    resolve_strategy_runtime_action_regime_details,
+)
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    StrategyRuntimeAttributionExecutionDetails,
+    resolve_strategy_runtime_attribution_execution_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    StrategyRuntimeControlActionDeepDetails,
+    resolve_strategy_runtime_control_action_deep_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    StrategyRuntimeControlOptimizerDetails,
+    resolve_strategy_runtime_control_optimizer_details,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import (
+    StrategyRuntimeDiagnosticsResult,
+    build_strategy_runtime_diagnostics_result,
+)
+from openfinance.quant.backtest.strategy_runtime_summary import (
+    StrategyRuntimeOutcomeSummary,
+    build_strategy_runtime_outcome_summary,
+)
+from openfinance.quant.backtest.strategy_trace import (
+    StrategyTraceArtifact,
+    build_strategy_trace_artifact,
+    coerce_factor_version_refs,
+)
 from openfinance.research.plan_registry import PlanRegistry
 
 router = APIRouter(tags=["trace"])
@@ -29,7 +59,13 @@ class RestoreReportHeader(BaseModel):
     market: str
     start: str
     end: str
-    factor_versions: list[dict[str, str]] = Field(default_factory=list)
+    factor_versions: list[FactorVersionRef] = Field(default_factory=list)
+    runtime_summary: StrategyRuntimeOutcomeSummary | None = None
+    runtime_diagnostics: StrategyRuntimeDiagnosticsResult | None = None
+    action_regime_details: StrategyRuntimeActionRegimeDetails | None = None
+    attribution_execution_details: StrategyRuntimeAttributionExecutionDetails | None = None
+    control_optimizer_details: StrategyRuntimeControlOptimizerDetails | None = None
+    control_action_deep_details: StrategyRuntimeControlActionDeepDetails | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
     report_path: str | None = None
@@ -40,6 +76,7 @@ class RestoreBacktestRequest(BaseModel):
     run_id: str | None = None
     request: dict[str, Any]
     source: str = "registry"
+    strategy_trace: StrategyTraceArtifact | None = None
 
 
 class RestoreBundle(BaseModel):
@@ -111,13 +148,57 @@ def _report_header_from_entry(entry: RunRegistryEntry, missing: list[str]) -> Re
             market=str(entry.market or req.get("market", "US")),
             start=str(req.get("start", "")),
             end=str(req.get("end", "")),
-            factor_versions=list(req.get("factor_versions", [])) if isinstance(req.get("factor_versions"), list) else [],
+            factor_versions=coerce_factor_version_refs(req.get("factor_versions")),
+            runtime_summary=None,
+            runtime_diagnostics=None,
+            action_regime_details=None,
+            attribution_execution_details=None,
+            control_optimizer_details=None,
+            control_action_deep_details=None,
             metrics={},
             created_at=None,
             report_path=str(report_path),
             report_missing=True,
         )
     report = BacktestReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    runtime_summary = build_strategy_runtime_outcome_summary(
+        summary_object="RestoreReportHeader",
+        run_id=str(report.run_id),
+        dataset_version=report.dataset_version,
+        market=str(getattr(report, "market", "") or entry.market or entry.request.get("market", "US")),
+        strategy_version=report.strategy_version,
+        metrics=dict(report.metrics),
+        strategy_trace=report.strategy_trace,
+    )
+    runtime_diagnostics = build_strategy_runtime_diagnostics_result(
+        diagnostics_object="RestoreReportHeader",
+        diagnostics=report.diagnostics,
+    )
+    action_regime_details = resolve_strategy_runtime_action_regime_details(
+        detail_object="RestoreReportHeader",
+        details=report.action_regime_details,
+        diagnostics=report.diagnostics,
+    )
+    attribution_execution_details = resolve_strategy_runtime_attribution_execution_details(
+        detail_object="RestoreReportHeader",
+        details=report.attribution_execution_details,
+        cost_breakdown=report.cost_breakdown,
+        attribution=report.attribution,
+        diagnostics=report.diagnostics,
+        orders=report.orders,
+        trades=report.trades,
+        metrics=report.metrics,
+    )
+    control_optimizer_details = resolve_strategy_runtime_control_optimizer_details(
+        detail_object="RestoreReportHeader",
+        details=report.control_optimizer_details,
+        diagnostics=report.diagnostics,
+    )
+    control_action_deep_details = resolve_strategy_runtime_control_action_deep_details(
+        detail_object="RestoreReportHeader",
+        details=report.control_action_deep_details,
+        diagnostics=report.diagnostics,
+    )
     return RestoreReportHeader(
         run_id=str(report.run_id),
         audit_trace_id=str(report.audit_trace_id),
@@ -127,11 +208,40 @@ def _report_header_from_entry(entry: RunRegistryEntry, missing: list[str]) -> Re
         market=str(getattr(report, "market", "") or entry.market or entry.request.get("market", "US")),
         start=str(entry.request.get("start", "")),
         end=str(entry.request.get("end", "")),
-        factor_versions=[row.model_dump(mode="json") for row in report.factor_versions],
+        factor_versions=list(report.factor_versions),
+        runtime_summary=runtime_summary,
+        runtime_diagnostics=runtime_diagnostics,
+        action_regime_details=action_regime_details,
+        attribution_execution_details=attribution_execution_details,
+        control_optimizer_details=control_optimizer_details,
+        control_action_deep_details=control_action_deep_details,
         metrics=dict(report.metrics),
         created_at=report.created_at.isoformat(),
         report_path=str(report_path),
         report_missing=False,
+    )
+
+
+def _strategy_trace_from_request_payload(payload_req: dict[str, Any]) -> StrategyTraceArtifact | None:
+    constraints = payload_req.get("constraints") if isinstance(payload_req.get("constraints"), dict) else {}
+    try:
+        request = BacktestRequest.model_validate(payload_req)
+    except ValidationError:
+        return build_strategy_trace_artifact(
+            trace_object="BacktestRequest",
+            strategy_decision=constraints.get("strategy_decision"),
+            strategy_validation=constraints.get("strategy_validation"),
+            strategy_compilation=constraints.get("strategy_compilation"),
+            evaluation_plan=parse_backtest_evaluation_plan(payload_req.get("evaluation_plan")),
+            factor_versions=coerce_factor_version_refs(payload_req.get("factor_versions")),
+        )
+    return build_strategy_trace_artifact(
+        trace_object="BacktestRequest",
+        strategy_decision=constraints.get("strategy_decision"),
+        strategy_validation=constraints.get("strategy_validation"),
+        strategy_compilation=constraints.get("strategy_compilation"),
+        evaluation_plan=request.evaluation_plan,
+        factor_versions=request.factor_versions,
     )
 
 
@@ -195,7 +305,13 @@ def restore_trace_context(trace_id: str, session_id: str | None = Query(default=
             key = json.dumps(payload_req, sort_keys=True, ensure_ascii=False)
             if key not in backtest_req_dedup:
                 backtest_req_dedup.add(key)
-                backtest_requests.append(RestoreBacktestRequest(request=payload_req, source="audit"))
+                backtest_requests.append(
+                    RestoreBacktestRequest(
+                        request=payload_req,
+                        source="audit",
+                        strategy_trace=_strategy_trace_from_request_payload(payload_req),
+                    )
+                )
         payload_agents = row.payload.get("agent_outputs")
         if isinstance(payload_agents, list):
             for item in payload_agents:
@@ -267,7 +383,14 @@ def restore_trace_context(trace_id: str, session_id: str | None = Query(default=
         if key in backtest_req_dedup:
             continue
         backtest_req_dedup.add(key)
-        backtest_requests.append(RestoreBacktestRequest(run_id=row.run_id, request=entry.request, source="registry"))
+        backtest_requests.append(
+            RestoreBacktestRequest(
+                run_id=row.run_id,
+                request=entry.request,
+                source="registry",
+                strategy_trace=_strategy_trace_from_request_payload(entry.request),
+            )
+        )
 
     parsed_session_id: UUID | None = None
     if session_id:

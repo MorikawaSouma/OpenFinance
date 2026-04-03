@@ -123,7 +123,7 @@ type ExecuteChatSendOptions = {
   sessionIdForRequest: string | null;
   includeDebug: boolean;
   currentRiskSnapshot: RiskStatus | null;
-  syncActiveSession: (sessionId: string | null) => void;
+  commitResolvedSessionScope: (sessionId: string | null) => void;
   upsertChatResponse: (response: ChatResponse, maxMessages?: number) => void;
   setRiskSnapshot: (snapshot: RiskStatus | null, refreshedAt?: string | null) => void;
   upsertApproval: (row: ApprovalRequest, refreshedAt?: string | null) => void;
@@ -163,7 +163,7 @@ export async function executeChatSend(options: ExecuteChatSendOptions): Promise<
     recordStateUpdate("approvals");
   }
 
-  options.syncActiveSession(String(response.session_id ?? "").trim() || null);
+  options.commitResolvedSessionScope(String(response.session_id ?? "").trim() || null);
 
   const linkedTaskIds = extractTaskIdsFromChatResponse(response);
   if (linkedTaskIds.length > 0) {

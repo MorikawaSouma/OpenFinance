@@ -14,7 +14,10 @@ import {
 } from "recharts";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useResearchContextState } from "@/components/providers/research-context-provider";
+import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
+import { useWorkbenchShellActions } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,7 +31,10 @@ import type { FactorDetail, FactorMultiMarketCompareResponse, FactorSummary } fr
 const MARKET_OPTIONS = ["US", "CN", "JP", "CRYPTO"] as const;
 
 export default function FactorsPage() {
-  const { latestDatasetVersion, pushToast, tasks, activeSessionId } = useWorkbench();
+  const { datasets } = useCatalogSummaryState();
+  const { lastSessionId } = useResearchContextState();
+  const { tasks } = useTaskRealtimeState();
+  const { pushToast } = useWorkbenchShellActions();
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<FactorSummary[]>([]);
   const [activeVersion, setActiveVersion] = useState<string | null>(null);
@@ -55,7 +61,8 @@ export default function FactorsPage() {
   const factorTaskEventRef = useRef("");
   const multiMarketTaskEventRef = useRef("");
 
-  const sessionTaskScope = useMemo(() => (activeSessionId || "factors").trim(), [activeSessionId]);
+  const latestDatasetVersion = datasets[0]?.dataset_version ?? null;
+  const sessionTaskScope = useMemo(() => (lastSessionId || "factors").trim(), [lastSessionId]);
 
   const factorTask = useMemo(() => {
     const byId = tasks.find((row) => String(row.task_id) === factorTaskId);

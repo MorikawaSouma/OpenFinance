@@ -8,9 +8,13 @@ import { Code2, FileText } from "lucide-react";
 import { EmptyState } from "@/components/common/empty-state";
 import {
   useChatWorkspaceActions,
-  useChatWorkspaceLegacyBridge,
   useChatWorkspaceState,
 } from "@/components/providers/chat-workspace-provider";
+import {
+  useCoordinatorConnectionState,
+  useCoordinatorRawEventFeed,
+  type RealtimeCoordinatorConnectionState,
+} from "@/components/providers/realtime-coordinator-provider";
 import { useRiskApprovalActions, useRiskApprovalState } from "@/components/providers/risk-approval-provider";
 import { useTaskRealtimeState } from "@/components/providers/task-realtime-provider";
 import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
@@ -224,7 +228,7 @@ function DebugPanel({
   }>;
   atBottomRef: MutableRefObject<boolean>;
   autoScrollEnabledRef: MutableRefObject<boolean>;
-  sseConnectionState: "connecting" | "open" | "closed" | "error" | "reconnecting";
+  sseConnectionState: RealtimeCoordinatorConnectionState;
 }) {
   const [virtualizerStats, setVirtualizerStats] = useState(() => ({
     measureCount: virtualizerDebugRef.current.measureCount,
@@ -663,10 +667,8 @@ export default function ChatPage() {
     revokeApproval,
   } = useRiskApprovalActions();
   const { tasks } = useTaskRealtimeState();
-  const {
-    events,
-    sseConnectionState,
-  } = useChatWorkspaceLegacyBridge();
+  const events = useCoordinatorRawEventFeed();
+  const sseConnectionState = useCoordinatorConnectionState();
   const {
     activeSessionId,
     chatSessions,
@@ -1030,9 +1032,11 @@ export default function ChatPage() {
     [dispatchMessage, pushToast]
   );
 
-  async function onSend(e: FormEvent) {
+  async function onSend(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    await dispatchMessage(input);
+    const form = e.currentTarget;
+    const submitted = String(new FormData(form).get("chat_message") ?? input);
+    await dispatchMessage(submitted);
   }
 
   async function submitUnlockRequest(e: FormEvent) {
@@ -1118,8 +1122,15 @@ export default function ChatPage() {
             )}
           </div>
           <form onSubmit={onSend} className="flex gap-2">
-            <Input value={input} onChange={(e) => setInput(e.target.value)} placeholder={messages.chat.askPlaceholder} />
-            <Button type="submit" disabled={sending}>{sending ? messages.chat.running : messages.chat.send}</Button>
+            <Input
+              name="chat_message"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={messages.chat.askPlaceholder}
+            />
+            <Button type="submit" disabled={sending} aria-label={messages.chat.send}>
+              {sending ? messages.chat.running : messages.chat.send}
+            </Button>
           </form>
 
           <div className="mt-3 flex gap-2">

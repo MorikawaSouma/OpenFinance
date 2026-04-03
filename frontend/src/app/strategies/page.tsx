@@ -3,13 +3,13 @@
 import Link from "next/link";
 
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
+import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function StrategiesPage() {
-  const { strategies, loadingCore } = useWorkbench();
+  const { strategies, isStrategiesBootstrapPending } = useCatalogSummaryState();
 
   return (
     <Card>
@@ -17,7 +17,7 @@ export default function StrategiesPage() {
         <CardTitle>Strategies</CardTitle>
       </CardHeader>
 
-      {loadingCore ? (
+      {isStrategiesBootstrapPending ? (
         <div className="space-y-2">
           {Array.from({ length: 6 }).map((_, i) => (
             <Skeleton key={i} className="h-12 w-full" />

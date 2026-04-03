@@ -35,6 +35,27 @@ def test_pr40_restore_trace_supports_modify_rerun() -> None:
     assert bundle["trace_id"] == trace_id
     assert bundle["reports_headers"]
     assert any(str(row.get("run_id")) == run_id for row in bundle["reports_headers"])
+    report_header = next(row for row in bundle["reports_headers"] if str(row.get("run_id")) == run_id)
+    assert isinstance(report_header.get("factor_versions"), list)
+    assert report_header["factor_versions"]
+    assert set(report_header["factor_versions"][0].keys()) == {"factor_id", "version"}
+    assert (report_header.get("runtime_summary") or {}).get("schema_version") == "strategy_runtime_outcome_summary.v1"
+    assert (report_header.get("runtime_summary") or {}).get("summary_object") == "RestoreReportHeader"
+    assert (report_header.get("runtime_diagnostics") or {}).get("schema_version") == "strategy_runtime_diagnostics.v1"
+    assert (report_header.get("runtime_diagnostics") or {}).get("diagnostics_object") == "RestoreReportHeader"
+    assert (report_header.get("action_regime_details") or {}).get("schema_version") == "strategy_runtime_action_regime.v1"
+    assert (report_header.get("action_regime_details") or {}).get("detail_object") == "RestoreReportHeader"
+    assert (report_header.get("attribution_execution_details") or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1"
+    assert (report_header.get("attribution_execution_details") or {}).get("detail_object") == "RestoreReportHeader"
+    assert (report_header.get("control_optimizer_details") or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1"
+    assert (report_header.get("control_optimizer_details") or {}).get("detail_object") == "RestoreReportHeader"
+    assert (report_header.get("control_action_deep_details") or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1"
+    assert (report_header.get("control_action_deep_details") or {}).get("detail_object") == "RestoreReportHeader"
+    assert bundle["backtest_requests"]
+    request_trace = (bundle["backtest_requests"][0] or {}).get("strategy_trace", {})
+    assert request_trace.get("schema_version") == "strategy_trace_artifact.v1"
+    assert request_trace.get("trace_object") == "BacktestRequest"
+    assert (request_trace.get("evaluation_plan") or {}).get("schema_version") == "backtest_evaluation_plan.v1"
     session_state = bundle["session_state"]
     assert session_state["last_run_id"] == run_id
     assert session_state["last_plan_id"] == run_payload["plan_id"]

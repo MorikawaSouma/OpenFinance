@@ -13,6 +13,8 @@ type WorkbenchChatStoreState = {
   setSseConnectionState: (next: SseConnectionState) => void;
 };
 
+// Legacy name only: after the WorkbenchProvider removal, this is the coordinator-owned
+// raw event buffer and connection-state store that /chat and domain providers still read.
 export const useWorkbenchChatStore = create<WorkbenchChatStoreState>()((set) => ({
   events: [],
   sseConnectionState: "connecting",

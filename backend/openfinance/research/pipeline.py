@@ -36,7 +36,18 @@ from openfinance.quant.factors.factor_spec import (
 )
 from openfinance.quant.factors.registry import FactorRegistry
 from openfinance.research.plan_registry import PlanRegistry
-from openfinance.research.strategy_agent import StrategyAgent, StrategyDecision
+from openfinance.research.strategy_compilation import (
+    StrategyCompilationPlan,
+    StrategyCompileRuntimeContext,
+    build_strategy_compile_runtime_context,
+    build_strategy_compilation_plan,
+)
+from openfinance.research.strategy_request_builder import build_strategy_backtest_request
+from openfinance.research.strategy_registry import StrategyRegistry
+from openfinance.research.strategy_agent import StrategyAgent
+from openfinance.research.strategy_decision import StrategyDecision
+from openfinance.research.strategy_spec import CircuitBreakerRule, CircuitBreakerSpec, StrategySpec
+from openfinance.research.strategy_validation import StrategyValidationResult, StrategyValidator
 from openfinance.tools.registry import build_default_tool_registry
 from openfinance.trading.paper import PaperOrderRequest
 from openfinance.trading.service import TradingService
@@ -94,40 +105,6 @@ class ResearchPlan(BaseModel):
     macro: ResearchSection
     stats: ResearchSection
     behavior: ResearchSection
-
-
-class CircuitBreakerRule(BaseModel):
-    type: Literal["consecutive_losses", "drawdown", "vol_spike"] = "drawdown"
-    threshold: float = Field(default=0.1, ge=0.0)
-    cool_down_days: int = Field(default=5, ge=0)
-
-
-class CircuitBreakerSpec(BaseModel):
-    enabled: bool = True
-    rule: CircuitBreakerRule = Field(default_factory=CircuitBreakerRule)
-
-
-class StrategySpec(BaseModel):
-    strategy_id: str
-    strategy_version: str
-    plan_id: str
-    experiment_id: str
-    market: str
-    strategy_family: str
-    rebalance: str
-    lookback_days: int
-    signal_threshold: float
-    position_sizing: str
-    risk_budget: str
-    max_position: float
-    stop_loss: float
-    leverage_limit: float
-    factor_weights: dict[str, float]
-    constraints: dict[str, Any]
-    circuit_breaker: CircuitBreakerSpec
-    failure_regimes: list[str] = Field(default_factory=list)
-    strategy_decision: dict[str, Any] = Field(default_factory=dict)
-    rationale: str
 
 
 class PlanCreateRequest(BaseModel):
@@ -191,9 +168,11 @@ class ExperimentResult(BaseModel):
     factor_report: dict[str, Any]
     factor_artifact_path: str
     factor_cached: bool = False
-    strategy_spec: dict[str, Any]
-    strategy_decision: dict[str, Any] = Field(default_factory=dict)
-    backtest_request: dict[str, Any]
+    strategy_spec: StrategySpec
+    strategy_decision: StrategyDecision | None = None
+    strategy_validation: StrategyValidationResult
+    strategy_compilation: StrategyCompilationPlan
+    backtest_request: BacktestRequest
     why_selected: str
 
 
@@ -211,8 +190,10 @@ class PipelineResponse(BaseModel):
     dataset_version: str
     run_id: str
     backtest_metrics: dict[str, Any]
-    strategy_config: dict[str, Any]
-    strategy_decision: dict[str, Any] = Field(default_factory=dict)
+    strategy_spec: StrategySpec
+    strategy_decision: StrategyDecision | None = None
+    strategy_validation: StrategyValidationResult
+    strategy_compilation: StrategyCompilationPlan
     risk_explanation: str
     research_plan: dict[str, Any] = Field(default_factory=dict)
     experiments: list[ExperimentResult] = Field(default_factory=list)
@@ -258,11 +239,13 @@ class ResearchPipelineEngine:
             report_root=dataset_registry.data_root.as_posix(),
         )
         self.factor_registry = FactorRegistry(settings.factor_registry_db_file)
+        self.strategy_registry = StrategyRegistry(settings.strategy_registry_db_file)
         self.factor_engine = FactorEngine(
             dataset_registry=dataset_registry,
             factor_registry=self.factor_registry,
             artifact_root=settings.factor_artifact_root,
         )
+        self.strategy_validator = StrategyValidator()
         self.knowledge: KnowledgeService = build_default_knowledge_service()
         self.llm_registry = LLMProviderRegistry()
         self.llm_registry.register(ZhipuGLM47Provider(), is_default=True)
@@ -906,10 +889,35 @@ class ResearchPipelineEngine:
                     factor_result.factor_version,
                     strategy_decision=strategy_decision,
                 )
+                strategy_validation = self.strategy_validator.validate_spec(
+                    strategy_spec,
+                    decision=strategy_decision,
+                )
+                runtime_context = build_strategy_compile_runtime_context(
+                    dataset_version=dataset_version,
+                    start=variant.start,
+                    end=variant.end,
+                    execution_model=str(plan.constraints.get("execution_model", "next_open")),
+                    run_time_utc=str(plan.constraints.get("run_time_utc", "16:00")),
+                    commission_bps=float(getattr(variant.cost_model, "commission_bps", 0.0) or 0.0),
+                    slippage_bps=float(getattr(variant.cost_model, "slippage_bps", 0.0) or 0.0),
+                    evidence_refs=self._build_evidence_refs(evidence),
+                    provenance_mode="pipeline_managed",
+                )
+                strategy_compilation = build_strategy_compilation_plan(
+                    strategy_spec,
+                    strategy_validation,
+                    decision=strategy_decision,
+                    runtime_context=runtime_context,
+                )
+                self.strategy_registry.register(spec=strategy_spec)
                 backtest_request = self._build_backtest_request(
                     plan=plan,
                     variant=variant,
                     strategy_spec=strategy_spec,
+                    strategy_validation=strategy_validation,
+                    strategy_compilation=strategy_compilation,
+                    runtime_context=runtime_context,
                     dataset_version=dataset_version,
                     evidence=evidence,
                     factor_id=factor_result.factor_id,
@@ -953,9 +961,11 @@ class ResearchPipelineEngine:
                     factor_report=factor_result.report.model_dump(mode="json"),
                     factor_artifact_path=factor_result.artifact_path,
                     factor_cached=factor_result.cached,
-                    strategy_spec=strategy_spec.model_dump(mode="json"),
-                    strategy_decision=strategy_decision.model_dump(mode="json"),
-                    backtest_request=backtest_request.model_dump(mode="json"),
+                    strategy_spec=strategy_spec,
+                    strategy_decision=strategy_decision,
+                    strategy_validation=strategy_validation,
+                    strategy_compilation=strategy_compilation,
+                    backtest_request=backtest_request,
                     why_selected=strategy_decision.selected.rationale or variant.notes or strategy_spec.rationale,
                 )
                 experiments.append(result)
@@ -1008,6 +1018,8 @@ class ResearchPipelineEngine:
                         "factor_cached": factor_result.cached,
                         "strategy_spec": strategy_spec.model_dump(mode="json"),
                         "strategy_decision": strategy_decision.model_dump(mode="json"),
+                        "strategy_validation": strategy_validation.model_dump(mode="json"),
+                        "strategy_compilation": strategy_compilation.model_dump(mode="json"),
                         "backtest_request": backtest_request.model_dump(mode="json"),
                         "evidence_pack_id": str(evidence.evidence_pack_id),
                         "metrics": report.metrics,
@@ -1125,7 +1137,7 @@ class ResearchPipelineEngine:
                 status="done",
                 summary=(
                     f"Selected strategy {best.strategy_version} ({best.strategy_family}). "
-                    f"{str((best.strategy_decision.get('selected') or {}).get('tradeoff_summary', ''))[:120]}"
+                    f"{str(best.strategy_decision.selected.tradeoff_summary if best.strategy_decision else '')[:120]}"
                 ).strip(),
                 artifacts=[best.strategy_version],
             )
@@ -1247,8 +1259,10 @@ class ResearchPipelineEngine:
             dataset_version=best.dataset_version,
             run_id=best.run_id,
             backtest_metrics=best.metrics,
-            strategy_config=best.strategy_spec,
+            strategy_spec=best.strategy_spec,
             strategy_decision=best.strategy_decision,
+            strategy_validation=best.strategy_validation,
+            strategy_compilation=best.strategy_compilation,
             risk_explanation=risk_explanation,
             research_plan=plan.model_dump(mode="json"),
             experiments=experiments,
@@ -1428,16 +1442,20 @@ class ResearchPipelineEngine:
         factor_version: str,
         strategy_decision: StrategyDecision | None = None,
     ) -> StrategySpec:
-        selected_spec = strategy_decision.selected.spec if strategy_decision else {}
-        selected_rebalance = str(selected_spec.get("rebalance", variant.rebalance)).strip().lower()
-        selected_lookback = int(selected_spec.get("lookback_days", variant.lookback_days) or variant.lookback_days)
+        selected_spec = strategy_decision.selected.spec if strategy_decision else None
+        selected_rebalance = str((selected_spec.rebalance if selected_spec else variant.rebalance) or variant.rebalance).strip().lower()
+        selected_lookback = int(selected_spec.lookback_days if selected_spec else variant.lookback_days)
         selected_signal_threshold = float(
-            selected_spec.get("signal_threshold", variant.signal_threshold) or variant.signal_threshold
+            selected_spec.signal_threshold if selected_spec else variant.signal_threshold
         )
-        selected_position_sizing = str(selected_spec.get("position_sizing", variant.position_sizing)).strip().lower()
-        selected_risk_budget = str(selected_spec.get("risk_budget", variant.risk_budget)).strip()
-        selected_max_position = float(selected_spec.get("max_position", variant.max_position) or variant.max_position)
-        selected_strategy_family = str(selected_spec.get("strategy_family", variant.strategy_family)).strip()
+        selected_position_sizing = str(
+            (selected_spec.position_sizing if selected_spec else variant.position_sizing) or variant.position_sizing
+        ).strip().lower()
+        selected_risk_budget = str((selected_spec.risk_budget if selected_spec else variant.risk_budget) or variant.risk_budget).strip()
+        selected_max_position = float(selected_spec.max_position if selected_spec else variant.max_position)
+        selected_strategy_family = str(
+            (selected_spec.strategy_family if selected_spec else variant.strategy_family) or variant.strategy_family
+        ).strip()
         selected_max_position = max(0.01, min(0.95, selected_max_position))
         selected_lookback = max(2, min(252, selected_lookback))
         weights = self._factor_weights(plan.candidate_factors)
@@ -1445,7 +1463,7 @@ class ResearchPipelineEngine:
             "plan_id": plan.plan_id,
             "variant_id": variant.variant_id,
             "factor_version": factor_version,
-            "strategy_decision_selected": selected_spec,
+            "strategy_decision_selected": selected_spec.model_dump(mode="json") if selected_spec else {},
             "constraints": plan.constraints,
         }
         strategy_version = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
@@ -1520,8 +1538,11 @@ class ResearchPipelineEngine:
                 ),
             ),
             failure_regimes=failure_regimes,
-            strategy_decision=strategy_decision.model_dump(mode="json") if strategy_decision else {},
             rationale=rationale,
+            evidence_refs=[
+                f"plan:{plan.plan_id}",
+                f"factor_version:{factor_version}",
+            ],
         )
 
     def _build_backtest_request(
@@ -1529,6 +1550,9 @@ class ResearchPipelineEngine:
         plan: ResearchPlan,
         variant: ExperimentVariant,
         strategy_spec: StrategySpec,
+        strategy_validation: StrategyValidationResult,
+        strategy_compilation: StrategyCompilationPlan,
+        runtime_context: StrategyCompileRuntimeContext,
         dataset_version: str,
         evidence: EvidencePack,
         factor_id: str,
@@ -1553,43 +1577,45 @@ class ResearchPipelineEngine:
             "position_sizing": strategy_spec.position_sizing,
             "risk_budget": strategy_spec.risk_budget,
             "max_position": strategy_spec.max_position,
-            "execution_model": str(plan.constraints.get("execution_model", "next_open")),
             "factor_version": factor_version,
             "factor_id": factor_id,
             "factor_versions": [{"factor_id": factor_id, "version": factor_version}],
             "factor_artifact_path": factor_artifact_path,
             "failure_conditions": failure_conditions_payload,
-            "strategy_decision": strategy_decision.model_dump(mode="json") if strategy_decision else strategy_spec.strategy_decision,
+            "strategy_decision": strategy_decision.model_dump(mode="json") if strategy_decision else {},
         }
         constraints.update(plan.constraints)
         constraints["circuit_breaker"] = strategy_spec.circuit_breaker.model_dump(mode="json")
         constraints["failure_regimes"] = list(strategy_spec.failure_regimes)
         if strategy_spec.circuit_breaker.rule.type == "drawdown":
             constraints["max_drawdown_target"] = float(strategy_spec.circuit_breaker.rule.threshold)
-        return BacktestRequest(
-            dataset_version=dataset_version,
+        return build_strategy_backtest_request(
             strategy_id=strategy_spec.strategy_id,
             strategy_version=strategy_spec.strategy_version,
             market=self._plan_market(plan),
-            start=variant.start,
-            end=variant.end,
-            execution_model=str(constraints.get("execution_model", "next_open")),
-            cost_model=variant.cost_model,
-            factor_versions=[{"factor_id": factor_id, "version": factor_version}],
+            runtime_context=runtime_context.model_copy(
+                update={
+                    "dataset_version": dataset_version,
+                    "commission_bps": float(getattr(variant.cost_model, "commission_bps", 0.0) or 0.0),
+                    "slippage_bps": float(getattr(variant.cost_model, "slippage_bps", 0.0) or 0.0),
+                },
+                deep=True,
+            ),
             constraints=constraints,
+            factor_versions=[{"factor_id": factor_id, "version": factor_version}],
             evaluation_plan={
                 "window": {"start": variant.start, "end": variant.end},
                 "stress": ["high_cost", "regime_shift", "liquidity_shock"],
                 "seed": plan.seed,
                 "evidence_pack_id": str(evidence.evidence_pack_id),
-                "evidence_refs": self._build_evidence_refs(evidence),
                 "factor_id": factor_id,
                 "factor_version": factor_version,
-                "factor_versions": [{"factor_id": factor_id, "version": factor_version}],
                 "factor_artifact_path": factor_artifact_path,
                 "failure_conditions": failure_conditions_payload,
-                "strategy_decision": strategy_decision.model_dump(mode="json") if strategy_decision else strategy_spec.strategy_decision,
             },
+            strategy_decision=strategy_decision,
+            strategy_validation=strategy_validation,
+            strategy_compilation=strategy_compilation,
         )
 
     def _stage_paper_trade(
@@ -1943,6 +1969,9 @@ class ResearchPipelineEngine:
         mdd = float(metrics.get("max_drawdown", 0.0) or 0.0)
         ret = float(metrics.get("total_return", 0.0) or 0.0)
         turnover = float(metrics.get("turnover", 0.0) or 0.0)
+        trade_count = int(metrics.get("trade_count", 0) or 0)
+        order_count = int(metrics.get("order_count", 0) or 0)
+        reject_count = int(metrics.get("reject_count", 0) or 0)
         obj_text = " ".join(objectives).lower()
         score = sharpe * 1.4 + ret * 0.8 - mdd * 1.8 - turnover * 0.1
         if ("\u4f4e\u56de\u64a4" in obj_text) or ("drawdown" in obj_text):
@@ -1951,6 +1980,14 @@ class ResearchPipelineEngine:
             score += sharpe * 0.5
         if "\u4e8b\u4ef6" in obj_text:
             score += ret * 0.3
+        if trade_count == 0:
+            score -= 0.35
+            if order_count > 0:
+                score -= 0.1
+            if abs(ret) <= 1e-9 and abs(turnover) <= 1e-9:
+                score -= 0.1
+        if reject_count > 0:
+            score -= min(0.25, reject_count * 0.02)
         return round(score, 6)
 
     def _factor_weights(self, factors: list[FactorCandidate]) -> dict[str, float]:

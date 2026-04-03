@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   return (
-    <aside className="workspace-sidebar flex h-full w-[274px] flex-col border-r border-border/80 bg-card/74 backdrop-blur-2xl">
+    <aside className="workspace-sidebar flex h-full w-[274px] flex-col border-r border-border/80 bg-card/90 backdrop-blur-md">
       <div className="border-b border-border/80 px-4 py-5">
         <div className="metric-chip mb-2 w-fit">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
@@ -28,12 +28,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             <Link
               key={item.href}
               href={item.href}
+              prefetch={false}
               onClick={onNavigate}
               className={cn(
-                "nav-pill elevate-hover flex items-center gap-2 px-3 py-2 text-sm",
+                "nav-pill flex items-center gap-2 px-3 py-2 text-sm",
                 active
                   ? "bg-primary text-primary-foreground shadow-sm dark:bg-primary/90"
-                  : "text-muted-foreground hover:bg-accent/80 hover:text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent/65 hover:text-accent-foreground"
               )}
             >
               <span className={cn("grid h-6 w-6 place-items-center rounded-md", active ? "bg-primary-foreground/18" : "bg-muted/55")}>

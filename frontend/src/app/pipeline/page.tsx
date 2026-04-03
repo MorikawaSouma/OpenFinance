@@ -7,9 +7,9 @@ import { CheckCircle2, Circle, Download, Play } from "lucide-react";
 import { EmptyState } from "@/components/common/empty-state";
 import {
   usePipelineWorkspaceActions,
-  usePipelineWorkspaceLegacyBridge,
   usePipelineWorkspaceState,
 } from "@/components/providers/pipeline-workspace-provider";
+import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,8 +29,38 @@ const stepOrder = [
   "risk.explain",
 ];
 
+function validationBadgeVariant(status: string) {
+  if (status === "invalid") return "destructive" as const;
+  if (status === "warn") return "warning" as const;
+  return "success" as const;
+}
+
+function compilePolicyBadgeVariant(status: string) {
+  if (status === "blocked") return "destructive" as const;
+  if (status === "allowed_with_warning") return "warning" as const;
+  return "success" as const;
+}
+
+function formatCompilePolicyToken(value: string) {
+  return value.replace(/_/g, " ");
+}
+
+function formatCompileValue(value: unknown) {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value == null) return "null";
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+  } catch {
+    return "[unserializable]";
+  }
+}
+
 export default function PipelinePage() {
-  const { mode, latestPipeline, runPipeline, pushToast, tasks, sessionTaskScope } = usePipelineWorkspaceLegacyBridge();
+  const { mode } = useWorkbenchShellState();
+  const { pushToast } = useWorkbenchShellActions();
   const {
     question,
     market,
@@ -38,8 +68,9 @@ export default function PipelinePage() {
     autoAdjustForRules,
     confirmMigrationRisk,
     running,
-    pipelineTaskId,
     preflightWarnings,
+    displayPipeline,
+    pipelineInProgress,
   } = usePipelineWorkspaceState();
   const {
     setQuestion,
@@ -47,34 +78,8 @@ export default function PipelinePage() {
     setHighTurnoverMode,
     setAutoAdjustForRules,
     setConfirmMigrationRisk,
-    setRunning,
-    setPipelineTaskId,
-    setPreflightWarnings,
+    runPipeline,
   } = usePipelineWorkspaceActions();
-
-  const activePipelineTask = useMemo(() => {
-    const byId = tasks.find((row) => String(row.task_id) === pipelineTaskId);
-    if (byId) return byId;
-    return (
-      tasks.find((row) => {
-        if (String(row.task_type) !== "pipeline_run") return false;
-        const metaSession = String((row.meta ?? {}).session_id ?? "").trim();
-        return metaSession === sessionTaskScope;
-      }) ?? null
-    );
-  }, [pipelineTaskId, sessionTaskScope, tasks]);
-  const taskPipelinePayload = useMemo(() => {
-    const result = activePipelineTask?.result && typeof activePipelineTask.result === "object" ? activePipelineTask.result : {};
-    const payload = (result as Record<string, unknown>).pipeline_response;
-    return payload && typeof payload === "object" ? (payload as typeof latestPipeline) : null;
-  }, [activePipelineTask, latestPipeline]);
-  const displayPipeline = taskPipelinePayload ?? latestPipeline;
-  const pipelineInProgress = useMemo(() => {
-    if (running) return true;
-    if (!activePipelineTask) return false;
-    const status = String(activePipelineTask.status || "").toLowerCase();
-    return !["done", "error", "failed", "canceled"].includes(status);
-  }, [activePipelineTask, running]);
 
   const frameworkSections = useMemo(() => {
     const plan = displayPipeline?.research_plan;
@@ -88,39 +93,7 @@ export default function PipelinePage() {
   }, [displayPipeline]);
 
   async function onRun() {
-    setRunning(true);
-    try {
-      const constraints: Record<string, unknown> = {};
-      if (highTurnoverMode) {
-        constraints.factor_cost_sensitivity_level = "high";
-        constraints.factor_expected_horizon = "intraday";
-        constraints.expected_turnover = 0.65;
-        constraints.expected_turnover_threshold = 0.35;
-        constraints.auto_round_lot = false;
-      }
-
-      const planPreview = await api.createPlan({ question, market, constraints });
-      const warnings = planPreview.preflight_warnings ?? [];
-      setPreflightWarnings(warnings);
-      const hasBlock = warnings.some((row) => row.severity === "block");
-      if (hasBlock && !autoAdjustForRules && !confirmMigrationRisk) {
-        pushToast("Preflight blocked", "Confirm migration risk or enable auto-adjust before running.", "error");
-        return;
-      }
-
-      const task = await runPipeline(question, market, {
-        planId: planPreview.plan_id,
-        constraints,
-        migrationPreflightConfirmed: confirmMigrationRisk,
-        autoAdjustForMarketRules: autoAdjustForRules,
-      });
-      setPipelineTaskId(String(task.task_id));
-      pushToast("Pipeline task submitted", `Task ${String(task.task_id).slice(0, 8)} is running.`, "success");
-    } catch (err) {
-      pushToast("Pipeline failed", err instanceof Error ? err.message : "Unknown error", "error");
-    } finally {
-      setRunning(false);
-    }
+    await runPipeline();
   }
 
   async function exportAuditBundle() {
@@ -300,6 +273,269 @@ export default function PipelinePage() {
               ) : null}
             </CardContent>
           </Card>
+
+          {displayPipeline.strategy_spec ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Selected Strategy Spec</CardTitle>
+                <CardDescription>
+                  Product-facing strategy semantics. The executable backtest request remains an internal runtime object.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-3 text-sm md:grid-cols-2">
+                <p>strategy_id: <span className="font-medium">{displayPipeline.strategy_spec.strategy_id}</span></p>
+                <p>strategy_version: <span className="font-medium">{displayPipeline.strategy_spec.strategy_version}</span></p>
+                <p>strategy_family: <span className="font-medium">{displayPipeline.strategy_spec.strategy_family}</span></p>
+                <p>market: <span className="font-medium">{displayPipeline.strategy_spec.market}</span></p>
+                <p>rebalance: <span className="font-medium">{displayPipeline.strategy_spec.rebalance}</span></p>
+                <p>lookback_days: <span className="font-medium">{displayPipeline.strategy_spec.lookback_days}</span></p>
+                <p>position_sizing: <span className="font-medium">{displayPipeline.strategy_spec.position_sizing}</span></p>
+                <p>risk_budget: <span className="font-medium">{displayPipeline.strategy_spec.risk_budget}</span></p>
+                <p>max_position: <span className="font-medium">{displayPipeline.strategy_spec.max_position}</span></p>
+                <p>leverage_limit: <span className="font-medium">{displayPipeline.strategy_spec.leverage_limit}</span></p>
+                <p>simulation_only: <span className="font-medium">{displayPipeline.strategy_spec.simulation_only ? "true" : "false"}</span></p>
+                <p>signal_threshold: <span className="font-medium">{displayPipeline.strategy_spec.signal_threshold}</span></p>
+                <div className="md:col-span-2">
+                  <p className="font-medium">Rationale</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{displayPipeline.strategy_spec.rationale}</p>
+                </div>
+                <div className="md:col-span-2">
+                  <p className="font-medium">Failure Regimes</p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {displayPipeline.strategy_spec.failure_regimes.length > 0 ? (
+                      displayPipeline.strategy_spec.failure_regimes.map((item) => (
+                        <Badge key={item} variant="muted">
+                          {item}
+                        </Badge>
+                      ))
+                    ) : (
+                      <span className="text-xs text-muted-foreground">No failure regimes recorded.</span>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {displayPipeline.strategy_validation ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Strategy Validation</CardTitle>
+                <CardDescription>
+                  Validation artifact between the durable `StrategySpec` and the internal `BacktestRequest`.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={validationBadgeVariant(displayPipeline.strategy_validation.status)}>
+                    {displayPipeline.strategy_validation.status}
+                  </Badge>
+                  <Badge variant="muted">
+                    decision={displayPipeline.strategy_validation.decision_status}
+                  </Badge>
+                  <Badge variant="muted">
+                    next={displayPipeline.strategy_validation.next_output}
+                  </Badge>
+                </div>
+                <p className="text-muted-foreground">{displayPipeline.strategy_validation.summary}</p>
+                <div className="grid gap-2 rounded-lg border border-dashed p-3 text-xs md:grid-cols-2">
+                  <p>compile_ready: <span className="font-medium">{displayPipeline.strategy_validation.compile_ready ? "true" : "false"}</span></p>
+                  <p>selected_candidate: <span className="font-medium">{displayPipeline.strategy_validation.selected_candidate ?? "n/a"}</span></p>
+                  <p>validated_object: <span className="font-medium">{displayPipeline.strategy_validation.validated_object}</span></p>
+                  <p>evidence_refs: <span className="font-medium">{displayPipeline.strategy_validation.evidence_refs.length}</span></p>
+                </div>
+                <div className="space-y-2">
+                  {displayPipeline.strategy_validation.checks.map((check) => (
+                    <div key={check.check_id} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                      <div className="flex items-center gap-2">
+                        <Badge variant={validationBadgeVariant(check.status)}>{check.status}</Badge>
+                        <span className="font-medium text-foreground">{check.check_id}</span>
+                      </div>
+                      <p className="mt-2">{check.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {displayPipeline.strategy_compilation ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Strategy Compilation</CardTitle>
+                <CardDescription>
+                  Typed compile mapping from validated `StrategySpec` into the internal `BacktestRequest`.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={validationBadgeVariant(displayPipeline.strategy_compilation.validation_status)}>
+                    {displayPipeline.strategy_compilation.validation_status}
+                  </Badge>
+                  <Badge variant="muted">
+                    target={displayPipeline.strategy_compilation.executable_object}
+                  </Badge>
+                  <Badge variant="muted">
+                    decision={displayPipeline.strategy_compilation.decision_status}
+                  </Badge>
+                  {displayPipeline.strategy_compilation.compilation_policy ? (
+                    <Badge variant={compilePolicyBadgeVariant(displayPipeline.strategy_compilation.compilation_policy.status)}>
+                      policy={displayPipeline.strategy_compilation.compilation_policy.status}
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="text-muted-foreground">{displayPipeline.strategy_compilation.summary}</p>
+                <div className="grid gap-2 rounded-lg border border-dashed p-3 text-xs md:grid-cols-2">
+                  <p>compile_ready: <span className="font-medium">{displayPipeline.strategy_compilation.compile_ready ? "true" : "false"}</span></p>
+                  <p>selected_candidate: <span className="font-medium">{displayPipeline.strategy_compilation.selected_candidate ?? "n/a"}</span></p>
+                  <p>bindings: <span className="font-medium">{displayPipeline.strategy_compilation.bindings.length}</span></p>
+                  <p>overlays: <span className="font-medium">{displayPipeline.strategy_compilation.overlays.length}</span></p>
+                </div>
+                {displayPipeline.strategy_compilation.compilation_profile ? (
+                  <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                    <p className="font-medium uppercase tracking-wide text-foreground">Compile Profile</p>
+                    <p className="mt-2">{displayPipeline.strategy_compilation.compilation_profile.summary}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {(["user_configurable", "environment_bound", "runtime_derived", "validation_required_override"] as const).map((kind) => {
+                        const count = displayPipeline.strategy_compilation?.compilation_profile?.input_policies.filter((row) => row.classification === kind).length ?? 0;
+                        return (
+                          <Badge key={kind} variant="muted">
+                            {formatCompilePolicyToken(kind)}={count}
+                          </Badge>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {displayPipeline.strategy_compilation.compilation_policy ? (
+                  <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                    <p className="font-medium uppercase tracking-wide text-foreground">Compile Policy</p>
+                    <p className="mt-2">{displayPipeline.strategy_compilation.compilation_policy.summary}</p>
+                    <p className="mt-2">
+                      rule_surface={displayPipeline.strategy_compilation.compilation_policy.rule_surface_id}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Badge variant={compilePolicyBadgeVariant(displayPipeline.strategy_compilation.compilation_policy.status)}>
+                        {displayPipeline.strategy_compilation.compilation_policy.status}
+                      </Badge>
+                      <Badge variant="muted">
+                        allowed={Math.max(
+                          0,
+                          displayPipeline.strategy_compilation.compilation_policy.checks.length
+                            - displayPipeline.strategy_compilation.compilation_policy.warning_count
+                            - displayPipeline.strategy_compilation.compilation_policy.blocked_count,
+                        )}
+                      </Badge>
+                      <Badge variant="muted">
+                        warning={displayPipeline.strategy_compilation.compilation_policy.warning_count}
+                      </Badge>
+                      <Badge variant="muted">
+                        blocked={displayPipeline.strategy_compilation.compilation_policy.blocked_count}
+                      </Badge>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {displayPipeline.strategy_compilation.compilation_profile ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Configuration Boundary</p>
+                      {displayPipeline.strategy_compilation.compilation_profile.input_policies.slice(0, 8).map((row) => (
+                        <div key={`${row.output_path}-${row.source_path}-policy`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                          <p className="font-medium text-foreground">{row.output_path}</p>
+                          <p className="mt-1">
+                            class={formatCompilePolicyToken(row.classification)} / configured_by={formatCompilePolicyToken(row.configured_by)}
+                          </p>
+                          <p className="mt-1">
+                            validated_by={formatCompilePolicyToken(row.validated_by)} / source={row.source_kind ?? "n/a"}:{row.source_path}
+                          </p>
+                          <p className="mt-1">{row.rationale}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Source Map</p>
+                    {displayPipeline.strategy_compilation.bindings.slice(0, 10).map((row) => (
+                      <div key={`${row.output_path}-${row.source_path}`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                        <p className="font-medium text-foreground">{row.output_path}</p>
+                        <p className="mt-1">source={row.source_kind} / {row.source_path}</p>
+                        <p className="mt-1 break-all">{formatCompileValue(row.value)}</p>
+                        {row.note ? <p className="mt-1">{row.note}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Overlays</p>
+                    {displayPipeline.strategy_compilation.overlays.length > 0 ? (
+                      displayPipeline.strategy_compilation.overlays.map((row) => (
+                        <div key={`${row.output_path}-${row.source_path}`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                          <p className="font-medium text-foreground">{row.output_path}</p>
+                          <p className="mt-1">final={formatCompileValue(row.final_value)}</p>
+                          <p className="mt-1">source={row.source_kind} / {row.source_path}</p>
+                          {row.overridden_source_path ? (
+                            <p className="mt-1">
+                              overrides={row.overridden_source_kind} / {row.overridden_source_path} ({formatCompileValue(row.overridden_value)})
+                            </p>
+                          ) : null}
+                          <p className="mt-1">{row.rationale}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                        No compile-time overlays were recorded for this pipeline result.
+                      </div>
+                    )}
+                    {displayPipeline.strategy_compilation.compilation_profile?.override_policies.length ? (
+                      <div className="space-y-2 pt-2">
+                        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Override Policy</p>
+                        {displayPipeline.strategy_compilation.compilation_profile.override_policies.map((row) => (
+                          <div key={`${row.output_path}-${row.source_path}-override-policy`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                            <p className="font-medium text-foreground">{row.output_path}</p>
+                            <p className="mt-1">
+                              class={formatCompilePolicyToken(row.classification)} / configured_by={formatCompilePolicyToken(row.configured_by)}
+                            </p>
+                            <p className="mt-1">
+                              source={row.source_kind}:{row.source_path} / requires_validation={row.requires_additional_validation ? "true" : "false"}
+                            </p>
+                            <p className="mt-1">{row.rationale}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  {displayPipeline.strategy_compilation.compilation_policy ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Policy Checks</p>
+                      {(displayPipeline.strategy_compilation.compilation_policy.checks.some((row) => row.outcome !== "allowed")
+                        ? displayPipeline.strategy_compilation.compilation_policy.checks.filter((row) => row.outcome !== "allowed")
+                        : displayPipeline.strategy_compilation.compilation_policy.checks.slice(0, 4)
+                      ).map((row) => (
+                        <div key={`${row.code}-${row.output_path}`} className="rounded-lg border p-3 text-xs text-muted-foreground">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={compilePolicyBadgeVariant(row.outcome)}>{row.outcome}</Badge>
+                            <span className="font-medium text-foreground">{row.output_path}</span>
+                          </div>
+                          <p className="mt-1">
+                            rule={row.rule_id} / code={row.code}
+                          </p>
+                          <p className="mt-1">
+                            fact={formatCompilePolicyToken(row.fact_source)} / checked_by={formatCompilePolicyToken(row.checked_by)}
+                          </p>
+                          <p className="mt-1">
+                            class={formatCompilePolicyToken(row.classification)} / configured_by={formatCompilePolicyToken(row.configured_by)}
+                          </p>
+                          <p className="mt-1">
+                            requires_validation={row.requires_additional_validation ? "true" : "false"}
+                          </p>
+                          <p className="mt-1">{row.detail}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
         </>
       )}
     </div>

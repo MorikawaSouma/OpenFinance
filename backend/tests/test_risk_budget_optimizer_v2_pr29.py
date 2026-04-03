@@ -95,6 +95,16 @@ def test_pr29_runner_reports_risk_contribution_and_high_vol_weight_drop(tmp_path
     assert isinstance(budget_dev, dict)
     assert float(budget_dev.get("mean_l1", 0.0)) >= 0.0
     assert "budget_deviation_mean" in report.metrics
+    assert report.control_optimizer_details is not None
+    assert report.control_optimizer_details.schema_version == "strategy_runtime_control_optimizer.v1"
+    assert report.control_optimizer_details.budget_detail.observations >= 1
+    assert len(report.control_optimizer_details.risk_contribution_points) >= 1
+    assert len(report.control_optimizer_details.optimizer_diagnostics) >= 1
+    assert report.control_action_deep_details is not None
+    assert report.control_action_deep_details.schema_version == "strategy_runtime_control_action_deep.v1"
+    assert report.control_action_deep_details.budget_breakdown.observations >= 1
+    assert report.control_action_deep_details.risk_contribution_breakdown.point_count >= 1
+    assert len(report.control_action_deep_details.optimizer_steps) >= 1
 
     early_rows = [row for idx, row in enumerate(rc_ts) if idx < max(2, len(rc_ts) // 3)]
     late_rows = [row for idx, row in enumerate(rc_ts) if idx >= max(2, len(rc_ts) * 2 // 3)]

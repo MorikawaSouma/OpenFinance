@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     plan_registry_file: str = ".openfinance/registry/plans.jsonl"
     evidence_db_file: str = ".openfinance/registry/evidence.sqlite3"
     factor_registry_db_file: str = ".openfinance/registry/factors.sqlite3"
+    strategy_registry_db_file: str = ".openfinance/registry/strategies.sqlite3"
     factor_artifact_root: str = ".openfinance/artifacts/factors"
     approval_db_file: str = ".openfinance/registry/approvals.sqlite3"
     risk_events_db_file: str = ".openfinance/registry/risk_events.sqlite3"

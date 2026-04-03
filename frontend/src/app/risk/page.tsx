@@ -6,7 +6,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { useRiskApprovalActions, useRiskApprovalState } from "@/components/providers/risk-approval-provider";
 import { useWorkbenchShellActions, useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
-import { useWorkbench } from "@/components/providers/workbench-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,10 +30,9 @@ const environments = [
 ];
 
 export default function RiskPage() {
-  const { loadingCore } = useWorkbench();
   const { mode } = useWorkbenchShellState();
   const { pushToast } = useWorkbenchShellActions();
-  const { riskSnapshot: risk, approvals } = useRiskApprovalState();
+  const { riskSnapshot: risk, approvals, isRiskBootstrapPending } = useRiskApprovalState();
   const {
     setKillSwitch,
     setLiveUnlock,
@@ -96,7 +94,7 @@ export default function RiskPage() {
     void loadRiskEvents();
   }, [loadLiveLogs, loadRiskEvents]);
 
-  if (loadingCore) {
+  if (isRiskBootstrapPending) {
     return (
       <div className="grid gap-4">
         <Skeleton className="h-24 w-full" />

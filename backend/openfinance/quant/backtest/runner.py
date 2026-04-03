@@ -12,6 +12,11 @@ from openfinance.data.contracts.dataset import GeneratedDataset, OHLCVBar
 from openfinance.data.contracts.instruments import Instrument, TradingHours
 from openfinance.data.registry import DatasetRegistry
 from openfinance.markets.plugins import build_market_rules_provider
+from openfinance.quant.backtest.evaluation_plan import (
+    BacktestEvaluationPlan,
+    backtest_evaluation_plan_payload,
+    parse_backtest_evaluation_plan,
+)
 from openfinance.quant.backtest.report import (
     BacktestOrder,
     BacktestReport,
@@ -20,6 +25,19 @@ from openfinance.quant.backtest.report import (
     FactorVersionRef,
     PositionSnapshot,
 )
+from openfinance.quant.backtest.strategy_runtime_action_regime import build_strategy_runtime_action_regime_details
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    build_strategy_runtime_attribution_execution_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    build_strategy_runtime_control_action_deep_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    build_strategy_runtime_control_optimizer_details,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import build_strategy_runtime_diagnostics_result
+from openfinance.quant.backtest.strategy_runtime_summary import build_strategy_runtime_outcome_summary
+from openfinance.quant.backtest.strategy_trace import build_strategy_trace_artifact
 from openfinance.quant.checks import (
     FailureConditionCheckRegistry,
     normalize_failure_conditions,
@@ -34,6 +52,9 @@ from openfinance.quant.portfolio import (
     RiskParityOptimizer,
     ScoreBasedOptimizer,
 )
+from openfinance.research.strategy_compilation import parse_strategy_compilation_plan
+from openfinance.research.strategy_decision import parse_strategy_decision
+from openfinance.research.strategy_validation import parse_strategy_validation_result
 
 
 class BacktestRunner:
@@ -149,34 +170,116 @@ class BacktestRunner:
 
     def _build_report(self, request: BacktestRequest, dataset: GeneratedDataset) -> BacktestReport:
         factor_versions, factor_versions_reason = self._resolve_factor_versions(request)
-        strategy_decision_payload = self._resolve_strategy_decision(request)
+        strategy_decision = self._resolve_strategy_decision(request)
+        strategy_validation = self._resolve_strategy_validation(request)
+        strategy_compilation = self._resolve_strategy_compilation(request)
+        strategy_trace = build_strategy_trace_artifact(
+            trace_object="BacktestReport",
+            strategy_decision=strategy_decision,
+            strategy_validation=strategy_validation,
+            strategy_compilation=strategy_compilation,
+            evaluation_plan=request.evaluation_plan,
+            factor_versions=factor_versions,
+            factor_lineage_reason=factor_versions_reason,
+        )
         bars = sorted([bar for bar in dataset.market if not bar.is_missing], key=lambda row: row.ts)
         if len(bars) < 2:
-            return BacktestReport(
+            empty_metrics = {
+                "total_return": 0.0,
+                "volatility": 0.0,
+                "sharpe": 0.0,
+                "max_drawdown": 0.0,
+                "trade_count": 0,
+                "turnover": 0.0,
+                "cost_drag": 0.0,
+            }
+            report = BacktestReport(
                 dataset_version=request.dataset_version,
                 market=str(request.market or "US").upper(),
                 strategy_version=request.strategy_version,
-                strategy_decision=strategy_decision_payload,
+                strategy_decision=strategy_decision,
+                strategy_validation=strategy_validation,
+                strategy_compilation=strategy_compilation,
+                strategy_trace=strategy_trace,
+                runtime_summary=build_strategy_runtime_outcome_summary(
+                    summary_object="BacktestReport",
+                    run_id=None,
+                    dataset_version=request.dataset_version,
+                    market=str(request.market or "US").upper(),
+                    strategy_version=request.strategy_version,
+                    metrics=empty_metrics,
+                    strategy_trace=strategy_trace,
+                ),
+                runtime_diagnostics=build_strategy_runtime_diagnostics_result(
+                    diagnostics_object="BacktestReport",
+                    diagnostics={"notes": "insufficient market bars"},
+                ),
+                action_regime_details=build_strategy_runtime_action_regime_details(
+                    detail_object="BacktestReport",
+                    diagnostics={"notes": "insufficient market bars"},
+                ),
+                attribution_execution_details=build_strategy_runtime_attribution_execution_details(
+                    detail_object="BacktestReport",
+                    cost_breakdown={},
+                    attribution={},
+                    diagnostics={"notes": "insufficient market bars"},
+                    orders=[],
+                    trades=[],
+                    metrics=empty_metrics,
+                ),
+                control_optimizer_details=build_strategy_runtime_control_optimizer_details(
+                    detail_object="BacktestReport",
+                    diagnostics={"notes": "insufficient market bars"},
+                ),
+                control_action_deep_details=build_strategy_runtime_control_action_deep_details(
+                    detail_object="BacktestReport",
+                    diagnostics={"notes": "insufficient market bars"},
+                ),
                 factor_versions=factor_versions,
                 factor_versions_reason=factor_versions_reason,
-                metrics={
-                    "total_return": 0.0,
-                    "volatility": 0.0,
-                    "sharpe": 0.0,
-                    "max_drawdown": 0.0,
-                    "trade_count": 0,
-                    "turnover": 0.0,
-                    "cost_drag": 0.0,
-                },
+                metrics=empty_metrics,
                 charts=["equity_curve", "drawdown_curve", "monthly_heatmap"],
                 diagnostics={
                     "notes": "insufficient market bars",
-                    "strategy_decision": strategy_decision_payload,
-                    "factor_lineage": {
-                        "factor_versions": [row.model_dump(mode="json") for row in factor_versions],
-                        "reason": factor_versions_reason,
-                    },
                 },
+            )
+            return report.model_copy(
+                update={
+                    "runtime_summary": build_strategy_runtime_outcome_summary(
+                        summary_object="BacktestReport",
+                        run_id=str(report.run_id),
+                        dataset_version=report.dataset_version,
+                        market=str(report.market or ""),
+                        strategy_version=report.strategy_version,
+                        metrics=report.metrics,
+                        strategy_trace=report.strategy_trace,
+                    ),
+                    "runtime_diagnostics": build_strategy_runtime_diagnostics_result(
+                        diagnostics_object="BacktestReport",
+                        diagnostics=report.diagnostics,
+                    ),
+                    "action_regime_details": build_strategy_runtime_action_regime_details(
+                        detail_object="BacktestReport",
+                        diagnostics=report.diagnostics,
+                    ),
+                    "attribution_execution_details": build_strategy_runtime_attribution_execution_details(
+                        detail_object="BacktestReport",
+                        cost_breakdown=report.cost_breakdown,
+                        attribution=report.attribution,
+                        diagnostics=report.diagnostics,
+                        orders=report.orders,
+                        trades=report.trades,
+                        metrics=report.metrics,
+                    ),
+                    "control_optimizer_details": build_strategy_runtime_control_optimizer_details(
+                        detail_object="BacktestReport",
+                        diagnostics=report.diagnostics,
+                    ),
+                    "control_action_deep_details": build_strategy_runtime_control_action_deep_details(
+                        detail_object="BacktestReport",
+                        diagnostics=report.diagnostics,
+                    ),
+                }
             )
 
         market = str(request.market or "US").upper()
@@ -190,6 +293,7 @@ class BacktestRunner:
         rebalance = str(request.constraints.get("rebalance", "weekly")).lower()
         position_sizing = str(request.constraints.get("position_sizing", "risk_budget")).lower()
         risk_budget = str(request.constraints.get("risk_budget", "vol_target_10pct")).lower()
+        allow_short = bool(request.constraints.get("allow_short", False))
         default_optimizer = "risk_budget_v2" if position_sizing in {"risk_budget", "vol_target"} else (
             "risk_parity" if family == "risk_parity" else "score_based"
         )
@@ -604,7 +708,8 @@ class BacktestRunner:
             elif position_sizing == "score_weighted":
                 signal *= 0.9
 
-            raw_target_exposure = max(-1.0, min(1.0, signal)) * exposure_scalar * budget_scale
+            signal_floor = -1.0 if allow_short else 0.0
+            raw_target_exposure = max(signal_floor, min(1.0, signal)) * exposure_scalar * budget_scale
             if high_vol_now:
                 raw_target_exposure *= regime_exposure_scale
                 risk_actions.append(
@@ -641,7 +746,7 @@ class BacktestRunner:
                     constraints={
                         "max_position_weight": max_position_weight,
                         "max_gross_leverage": max_gross_leverage,
-                        "allow_short": False,
+                        "allow_short": allow_short,
                         "max_iter": int(request.constraints.get("optimizer_max_iter", 240) or 240),
                         "tol": float(request.constraints.get("optimizer_tol", 1e-4) or 1e-4),
                     },
@@ -956,20 +1061,60 @@ class BacktestRunner:
             "sector_pnl_contrib": sector_pnl_contrib,
             "notes": "event-driven backtest with market-rules constraints",
             "request_constraints": request.constraints,
-            "evaluation_plan": request.evaluation_plan,
             "series": {"equity_curve": equity_curve, "monthly_returns": monthly_returns},
-            "strategy_decision": strategy_decision_payload,
-            "factor_lineage": {
-                "factor_versions": [row.model_dump(mode="json") for row in factor_versions],
-                "reason": factor_versions_reason,
-            },
         }
 
-        return BacktestReport(
+        report = BacktestReport(
             dataset_version=request.dataset_version,
             market=market,
             strategy_version=request.strategy_version,
-            strategy_decision=strategy_decision_payload,
+            strategy_decision=strategy_decision,
+            strategy_validation=strategy_validation,
+            strategy_compilation=strategy_compilation,
+            strategy_trace=strategy_trace,
+            runtime_summary=build_strategy_runtime_outcome_summary(
+                summary_object="BacktestReport",
+                run_id=None,
+                dataset_version=request.dataset_version,
+                market=market,
+                strategy_version=request.strategy_version,
+                metrics=metrics,
+                strategy_trace=strategy_trace,
+            ),
+            runtime_diagnostics=build_strategy_runtime_diagnostics_result(
+                diagnostics_object="BacktestReport",
+                diagnostics=diagnostics,
+            ),
+            action_regime_details=build_strategy_runtime_action_regime_details(
+                detail_object="BacktestReport",
+                diagnostics=diagnostics,
+            ),
+            attribution_execution_details=build_strategy_runtime_attribution_execution_details(
+                detail_object="BacktestReport",
+                cost_breakdown={
+                    "commission": round(total_commission, 6),
+                    "slippage": round(total_slippage, 6),
+                    "commission_sum": round(total_commission, 6),
+                    "slippage_sum": round(total_slippage, 6),
+                    "total": round(total_cost, 6),
+                },
+                attribution={
+                    "instrument_pnl_contrib": instrument_pnl_contrib,
+                    "sector_pnl_contrib": sector_pnl_contrib,
+                },
+                diagnostics=diagnostics,
+                orders=orders,
+                trades=trades,
+                metrics=metrics,
+            ),
+            control_optimizer_details=build_strategy_runtime_control_optimizer_details(
+                detail_object="BacktestReport",
+                diagnostics=diagnostics,
+            ),
+            control_action_deep_details=build_strategy_runtime_control_action_deep_details(
+                detail_object="BacktestReport",
+                diagnostics=diagnostics,
+            ),
             factor_versions=factor_versions,
             factor_versions_reason=factor_versions_reason,
             metrics=metrics,
@@ -993,17 +1138,89 @@ class BacktestRunner:
                 "sector_pnl_contrib": sector_pnl_contrib,
             },
         )
+        return report.model_copy(
+            update={
+                "runtime_summary": build_strategy_runtime_outcome_summary(
+                    summary_object="BacktestReport",
+                    run_id=str(report.run_id),
+                    dataset_version=report.dataset_version,
+                    market=str(report.market or ""),
+                    strategy_version=report.strategy_version,
+                    metrics=report.metrics,
+                    strategy_trace=report.strategy_trace,
+                ),
+                "runtime_diagnostics": build_strategy_runtime_diagnostics_result(
+                    diagnostics_object="BacktestReport",
+                    diagnostics=report.diagnostics,
+                ),
+                "action_regime_details": build_strategy_runtime_action_regime_details(
+                    detail_object="BacktestReport",
+                    diagnostics=report.diagnostics,
+                ),
+                "attribution_execution_details": build_strategy_runtime_attribution_execution_details(
+                    detail_object="BacktestReport",
+                    cost_breakdown=report.cost_breakdown,
+                    attribution=report.attribution,
+                    diagnostics=report.diagnostics,
+                    orders=report.orders,
+                    trades=report.trades,
+                    metrics=report.metrics,
+                ),
+                "control_optimizer_details": build_strategy_runtime_control_optimizer_details(
+                    detail_object="BacktestReport",
+                    diagnostics=report.diagnostics,
+                ),
+                "control_action_deep_details": build_strategy_runtime_control_action_deep_details(
+                    detail_object="BacktestReport",
+                    diagnostics=report.diagnostics,
+                ),
+            }
+        )
 
-    def _resolve_strategy_decision(self, request: BacktestRequest) -> dict[str, Any]:
+    def _resolve_strategy_decision(self, request: BacktestRequest):
         rows: list[Any] = []
+        evaluation_plan = parse_backtest_evaluation_plan(request.evaluation_plan)
         if isinstance(request.constraints, dict):
             rows.append(request.constraints.get("strategy_decision"))
-        if isinstance(request.evaluation_plan, dict):
+        if evaluation_plan is not None:
+            rows.append(evaluation_plan.strategy_decision)
+        elif isinstance(request.evaluation_plan, dict):
             rows.append(request.evaluation_plan.get("strategy_decision"))
         for row in rows:
-            if isinstance(row, dict) and row:
-                return row
-        return {}
+            parsed = parse_strategy_decision(row)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _resolve_strategy_validation(self, request: BacktestRequest):
+        rows: list[Any] = []
+        evaluation_plan = parse_backtest_evaluation_plan(request.evaluation_plan)
+        if evaluation_plan is not None:
+            rows.append(evaluation_plan.strategy_validation)
+        elif isinstance(request.evaluation_plan, dict):
+            rows.append(request.evaluation_plan.get("strategy_validation"))
+        if isinstance(request.constraints, dict):
+            rows.append(request.constraints.get("strategy_validation"))
+        for row in rows:
+            parsed = parse_strategy_validation_result(row)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _resolve_strategy_compilation(self, request: BacktestRequest):
+        rows: list[Any] = []
+        evaluation_plan = parse_backtest_evaluation_plan(request.evaluation_plan)
+        if evaluation_plan is not None:
+            rows.append(evaluation_plan.strategy_compilation)
+        elif isinstance(request.evaluation_plan, dict):
+            rows.append(request.evaluation_plan.get("strategy_compilation"))
+        if isinstance(request.constraints, dict):
+            rows.append(request.constraints.get("strategy_compilation"))
+        for row in rows:
+            parsed = parse_strategy_compilation_plan(row)
+            if parsed is not None:
+                return parsed
+        return None
 
     def _resolve_factor_versions(self, request: BacktestRequest) -> tuple[list[FactorVersionRef], str | None]:
         refs: list[FactorVersionRef] = []
@@ -1024,7 +1241,18 @@ class BacktestRunner:
             _add(getattr(item, "factor_id", None), getattr(item, "version", None))
 
         constraints = request.constraints if isinstance(request.constraints, dict) else {}
-        evaluation_plan = request.evaluation_plan if isinstance(request.evaluation_plan, dict) else {}
+        parsed_evaluation_plan = parse_backtest_evaluation_plan(request.evaluation_plan)
+        evaluation_plan = (
+            backtest_evaluation_plan_payload(parsed_evaluation_plan)
+            if parsed_evaluation_plan is not None
+            else request.evaluation_plan
+            if isinstance(request.evaluation_plan, dict)
+            else {}
+        )
+
+        if parsed_evaluation_plan is not None:
+            for item in parsed_evaluation_plan.factor_versions:
+                _add(getattr(item, "factor_id", None), getattr(item, "version", None))
 
         self._collect_factor_version_refs(
             refs_add=_add,
@@ -1040,7 +1268,10 @@ class BacktestRunner:
         if refs:
             return refs, None
 
-        explicit_no_factor = bool(constraints.get("no_factor_strategy")) or bool(evaluation_plan.get("no_factor_strategy"))
+        explicit_no_factor = bool(constraints.get("no_factor_strategy")) or bool(
+            (parsed_evaluation_plan.no_factor_strategy if parsed_evaluation_plan is not None else None)
+            or evaluation_plan.get("no_factor_strategy")
+        )
         if constraints.get("use_factors") is False:
             explicit_no_factor = True
         if explicit_no_factor:
@@ -1053,7 +1284,14 @@ class BacktestRunner:
     def _resolve_failure_conditions(self, *, request: BacktestRequest) -> list[Any]:
         rows: list[Any] = []
         constraints = request.constraints if isinstance(request.constraints, dict) else {}
-        evaluation_plan = request.evaluation_plan if isinstance(request.evaluation_plan, dict) else {}
+        parsed_evaluation_plan = parse_backtest_evaluation_plan(request.evaluation_plan)
+        evaluation_plan = (
+            backtest_evaluation_plan_payload(parsed_evaluation_plan)
+            if parsed_evaluation_plan is not None
+            else request.evaluation_plan
+            if isinstance(request.evaluation_plan, dict)
+            else {}
+        )
         for container in (constraints, evaluation_plan):
             raw = container.get("failure_conditions")
             rows.extend(normalize_failure_conditions(raw, default_applies_to="strategy"))
@@ -1092,8 +1330,14 @@ class BacktestRunner:
         if isinstance(raw_single, str) and raw_single.strip():
             refs_add(container.get("factor_id", fallback_factor_id), raw_single)
 
-    def _coerce_evidence_refs(self, evaluation_plan: dict[str, Any]) -> list[str]:
-        raw = evaluation_plan.get("evidence_refs")
+    def _coerce_evidence_refs(self, evaluation_plan: BacktestEvaluationPlan | dict[str, Any]) -> list[str]:
+        parsed = parse_backtest_evaluation_plan(evaluation_plan)
+        if parsed is not None:
+            raw = parsed.evidence_refs
+        elif isinstance(evaluation_plan, dict):
+            raw = evaluation_plan.get("evidence_refs")
+        else:
+            raw = None
         if not isinstance(raw, list):
             return []
         refs: list[str] = []
@@ -1634,7 +1878,7 @@ class BacktestRunner:
         vol = statistics.pstdev(window) if len(window) > 1 else 0.01
 
         if family == "trend":
-            return 1.0 if mean_ret > threshold else -0.35
+            return 1.0 if mean_ret > threshold else 0.0
         if family == "trend_with_vol_filter":
             return 0.9 if (mean_ret > threshold and vol < 0.03) else 0.2
         if family == "mean_reversion":

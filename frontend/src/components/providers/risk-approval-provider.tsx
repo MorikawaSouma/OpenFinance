@@ -1,13 +1,18 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 
 import { useWorkbenchShellActions } from "@/components/providers/workbench-shell-provider";
 import type { ToastItem } from "@/components/ui/toast";
 import { api } from "@/lib/api";
+import { recordStateUpdate } from "@/lib/debug";
 import { messages } from "@/lib/messages";
 import { useRiskApprovalStore } from "@/lib/risk-approval-store";
-import type { ApprovalRequest, RiskStatus } from "@/lib/types";
+import { useWorkbenchChatStore } from "@/lib/workbench-chat-store";
+import type { ApprovalRequest, RiskStatus, SseEvent } from "@/lib/types";
+
+const RISK_APPROVAL_FALLBACK_POLL_MS = 12_000;
+let riskApprovalRealtimeRefreshInFlight: Promise<void> | null = null;
 
 type RiskApprovalActions = {
   refreshRiskSnapshot: () => Promise<void>;
@@ -35,11 +40,16 @@ export function RiskApprovalProvider({ children }: { children: ReactNode }) {
   const setRiskSnapshot = useRiskApprovalStore((state) => state.setRiskSnapshot);
   const replaceApprovals = useRiskApprovalStore((state) => state.replaceApprovals);
   const upsertApproval = useRiskApprovalStore((state) => state.upsertApproval);
+  const lastRiskRefreshAt = useRiskApprovalStore((state) => state.lastRiskRefreshAt);
+  const lastApprovalsRefreshAt = useRiskApprovalStore((state) => state.lastApprovalsRefreshAt);
+  const sseConnectionState = useWorkbenchChatStore((state) => state.sseConnectionState);
   const { pushToast } = useWorkbenchShellActions();
+  const previousSseConnectionStateRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Group 2A wires targeted risk/approval actions here, but initial hydrate and SSE freshness still come from the legacy bridge.
-    markOwnership("legacy-workbench");
+    // Phase-2B-3 keeps risk/approval ownership here and replaces legacy broad realtime refresh
+    // with domain-owned bootstrap, reconnect reconcile, and degraded-state fallback polling.
+    markOwnership("risk-approval-provider");
   }, [markOwnership]);
 
   const actions = useMemo<RiskApprovalActions>(
@@ -119,6 +129,32 @@ export function RiskApprovalProvider({ children }: { children: ReactNode }) {
     [pushToast, replaceApprovals, setRiskSnapshot, upsertApproval]
   );
 
+  const refreshRiskApprovalRealtime = useRefreshRiskApprovalRealtime();
+
+  useEffect(() => {
+    if (lastRiskRefreshAt !== null && lastApprovalsRefreshAt !== null) return;
+    void refreshRiskApprovalRealtime();
+  }, [lastApprovalsRefreshAt, lastRiskRefreshAt, refreshRiskApprovalRealtime]);
+
+  useEffect(() => {
+    const previous = previousSseConnectionStateRef.current;
+    previousSseConnectionStateRef.current = sseConnectionState;
+    if (sseConnectionState === "open" && previous && previous !== "open") {
+      void refreshRiskApprovalRealtime();
+    }
+  }, [refreshRiskApprovalRealtime, sseConnectionState]);
+
+  useEffect(() => {
+    if (sseConnectionState === "open") return;
+    const timer = setInterval(() => {
+      void refreshRiskApprovalRealtime();
+    }, RISK_APPROVAL_FALLBACK_POLL_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [refreshRiskApprovalRealtime, sseConnectionState]);
+
   return <RiskApprovalActionsContext.Provider value={actions}>{children}</RiskApprovalActionsContext.Provider>;
 }
 
@@ -136,6 +172,10 @@ export function useRiskApprovalState() {
     approvals: approvalOrder.map((requestId) => approvalsById[requestId]).filter(Boolean),
     lastRiskRefreshAt,
     lastApprovalsRefreshAt,
+    hasRiskSnapshotLoaded: lastRiskRefreshAt !== null,
+    hasApprovalsLoaded: lastApprovalsRefreshAt !== null,
+    isRiskBootstrapPending: lastRiskRefreshAt === null && riskSnapshot === null,
+    isApprovalsBootstrapPending: lastApprovalsRefreshAt === null && approvalOrder.length === 0,
   };
 }
 
@@ -145,6 +185,76 @@ export function useRiskApprovalActions() {
     throw new Error("useRiskApprovalActions must be used within RiskApprovalProvider");
   }
   return ctx;
+}
+
+function useRefreshRiskApprovalRealtime() {
+  const setRiskSnapshot = useRiskApprovalStore((state) => state.setRiskSnapshot);
+  const replaceApprovals = useRiskApprovalStore((state) => state.replaceApprovals);
+
+  return useCallback(async () => {
+    if (riskApprovalRealtimeRefreshInFlight) {
+      return riskApprovalRealtimeRefreshInFlight;
+    }
+
+    const refreshPromise = (async () => {
+      try {
+        const [riskRes, approvalsRes] = await Promise.all([api.getRiskStatus(), api.getApprovals()]);
+        setRiskSnapshot(riskRes);
+        replaceApprovals(approvalsRes);
+        recordStateUpdate("risk");
+        recordStateUpdate("approvals");
+      } catch {
+        // Keep realtime refresh failures silent; the event toast should still appear.
+      }
+    })();
+
+    riskApprovalRealtimeRefreshInFlight = refreshPromise;
+    try {
+      await refreshPromise;
+    } finally {
+      if (riskApprovalRealtimeRefreshInFlight === refreshPromise) {
+        riskApprovalRealtimeRefreshInFlight = null;
+      }
+    }
+  }, [replaceApprovals, setRiskSnapshot]);
+}
+
+export function useRiskApprovalRealtimeHandlers() {
+  const refreshRiskApprovalRealtime = useRefreshRiskApprovalRealtime();
+  const { pushToast } = useWorkbenchShellActions();
+
+  const handleRiskEvent = useCallback(
+    (event: SseEvent) => {
+      if (String(event.type ?? "").trim().toLowerCase() !== "risk.event") return;
+      void refreshRiskApprovalRealtime();
+      const payload = event.payload ?? {};
+      const message = String(payload.message ?? payload.event_type ?? "Risk event detected");
+      pushToast("Risk event", message, "error");
+    },
+    [pushToast, refreshRiskApprovalRealtime]
+  );
+
+  const handleApprovalStatusChanged = useCallback(
+    (event: SseEvent) => {
+      if (String(event.type ?? "").trim().toLowerCase() !== "approval.status_changed") return;
+      void refreshRiskApprovalRealtime();
+      const payload = event.payload ?? {};
+      const requestId = String(payload.request_id ?? "");
+      const status = String(payload.status ?? "");
+      if (requestId && status) {
+        pushToast("Approval status changed", `${requestId} -> ${status}`, "default");
+      }
+    },
+    [pushToast, refreshRiskApprovalRealtime]
+  );
+
+  return useMemo(
+    () => ({
+      handleRiskEvent,
+      handleApprovalStatusChanged,
+    }),
+    [handleApprovalStatusChanged, handleRiskEvent]
+  );
 }
 
 async function updateApprovalStatus(

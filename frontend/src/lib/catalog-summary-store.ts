@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 import type { DatasetEntry, RunSummary, StrategySummary } from "@/lib/types";
 
-export type CatalogSummaryOwnership = "placeholder" | "legacy-workbench";
+export type CatalogSummaryOwnership = "placeholder" | "catalog-summary-provider";
 
 type CatalogSummaryStoreState = {
   ownership: CatalogSummaryOwnership;

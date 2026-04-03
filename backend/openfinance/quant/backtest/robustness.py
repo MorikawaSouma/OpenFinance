@@ -3,6 +3,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from openfinance.quant.backtest.report import BacktestRequest
+from openfinance.quant.backtest.strategy_runtime_action_regime import StrategyRuntimeActionRegimeDetails
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    StrategyRuntimeAttributionExecutionDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    StrategyRuntimeControlActionDeepDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    StrategyRuntimeControlOptimizerDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import StrategyRobustnessResultDetails
+from openfinance.quant.backtest.strategy_runtime_summary import StrategyRobustnessOutcomeSummary
+from openfinance.research.strategy_compilation import StrategyCompilationPlan
+from openfinance.research.strategy_spec import StrategySpec
+from openfinance.research.strategy_validation import StrategyValidationResult
+
 
 class RobustnessVariant(BaseModel):
     variant_id: str
@@ -14,6 +31,10 @@ class RobustnessVariant(BaseModel):
     slippage_bps: float
     constraints: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, float | int | str] = Field(default_factory=dict)
+    action_regime_details: StrategyRuntimeActionRegimeDetails | None = None
+    attribution_execution_details: StrategyRuntimeAttributionExecutionDetails | None = None
+    control_optimizer_details: StrategyRuntimeControlOptimizerDetails | None = None
+    control_action_deep_details: StrategyRuntimeControlActionDeepDetails | None = None
 
 
 class RobustnessSummary(BaseModel):
@@ -60,6 +81,20 @@ class WorstCaseSummary(BaseModel):
     explanation: str = ""
 
 
+class RobustnessAnalysisConfig(BaseModel):
+    cost_multipliers: list[float] = Field(default_factory=list)
+    lookback_values: list[int] | None = None
+    threshold_values: list[float] | None = None
+    rebalance_values: list[str] | None = None
+    min_variants: int = 6
+    max_variants: int = 12
+    regime_vol_window: int = 20
+    stress_shock_return: float = -0.12
+    stress_vol_multiplier: float = 2.0
+    base_constraints: dict[str, Any] = Field(default_factory=dict)
+    base_cost_model: dict[str, float] = Field(default_factory=dict)
+
+
 class RobustnessReport(BaseModel):
     robustness_id: str
     dataset_version: str
@@ -76,4 +111,10 @@ class RobustnessReport(BaseModel):
     regime_metrics: list[RegimeMetric] = Field(default_factory=list)
     stress_metrics: list[StressMetric] = Field(default_factory=list)
     worst_case_summary: WorstCaseSummary = Field(default_factory=WorstCaseSummary)
-    base_spec: dict[str, Any] = Field(default_factory=dict)
+    outcome_summary: StrategyRobustnessOutcomeSummary | None = None
+    result_details: StrategyRobustnessResultDetails | None = None
+    base_strategy_spec: StrategySpec
+    base_strategy_validation: StrategyValidationResult
+    base_strategy_compilation: StrategyCompilationPlan
+    base_backtest_request: BacktestRequest
+    analysis_config: RobustnessAnalysisConfig

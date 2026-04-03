@@ -6,17 +6,19 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Database, PlayCircle } from "lucide-react";
 
 import { useCatalogSummaryState } from "@/components/providers/catalog-summary-provider";
+import { useDashboardResearchActions } from "@/components/providers/dashboard-research-actions";
+import { useResearchRestoreActions } from "@/components/providers/research-context-provider";
 import { useRiskApprovalState } from "@/components/providers/risk-approval-provider";
 import { EmptyState } from "@/components/common/empty-state";
-import { useWorkbench } from "@/components/providers/workbench-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DashboardPage() {
-  const { loadingCore, generateDataset, runBacktest, restoreTraceContext } = useWorkbench();
-  const { runs, datasets } = useCatalogSummaryState();
+  const { generateDatasetTask, runBacktestTask } = useDashboardResearchActions();
+  const { restoreTraceToResearchContext } = useResearchRestoreActions();
+  const { runs, datasets, isRunsBootstrapPending } = useCatalogSummaryState();
   const { riskSnapshot: risk } = useRiskApprovalState();
   const router = useRouter();
   const [creatingDataset, setCreatingDataset] = useState(false);
@@ -28,7 +30,7 @@ export default function DashboardPage() {
   async function onGenerateDataset() {
     setCreatingDataset(true);
     try {
-      await generateDataset();
+      await generateDatasetTask();
     } finally {
       setCreatingDataset(false);
     }
@@ -37,7 +39,7 @@ export default function DashboardPage() {
   async function onRunBacktest() {
     setRunningBacktest(true);
     try {
-      await runBacktest();
+      await runBacktestTask();
     } finally {
       setRunningBacktest(false);
     }
@@ -46,7 +48,7 @@ export default function DashboardPage() {
   async function onRestore(traceId: string, runId: string) {
     setRestoringRunId(runId);
     try {
-      const bundle = await restoreTraceContext(traceId);
+      const bundle = await restoreTraceToResearchContext(traceId);
       const sessionId = bundle.session_state.session_id;
       router.push(`/chat?session_id=${encodeURIComponent(sessionId)}&restored_trace_id=${encodeURIComponent(traceId)}`);
     } finally {
@@ -62,7 +64,7 @@ export default function DashboardPage() {
           <CardDescription>Latest five backtest runs with risk profile snapshot.</CardDescription>
         </CardHeader>
         <CardContent>
-          {loadingCore ? (
+          {isRunsBootstrapPending ? (
             <div className="space-y-2">
               {Array.from({ length: 5 }).map((_, i) => (
                 <Skeleton key={i} className="h-14 w-full" />

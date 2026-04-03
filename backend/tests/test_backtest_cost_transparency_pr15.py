@@ -61,3 +61,8 @@ def test_cost_doubling_changes_cost_breakdown(tmp_path: Path) -> None:
     assert high_cost.cost_breakdown["commission_sum"] > low_cost.cost_breakdown["commission_sum"]
     assert high_cost.cost_breakdown["slippage_sum"] > low_cost.cost_breakdown["slippage_sum"]
     assert high_cost.cost_breakdown["total"] > low_cost.cost_breakdown["total"]
+    assert high_cost.attribution_execution_details is not None
+    assert low_cost.attribution_execution_details is not None
+    assert (high_cost.attribution_execution_details.cost_detail.total_cost or 0.0) > (
+        low_cost.attribution_execution_details.cost_detail.total_cost or 0.0
+    )

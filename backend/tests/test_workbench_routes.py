@@ -83,9 +83,10 @@ def test_workbench_dataset_and_backtest_flow() -> None:
     strategy_detail = client.get(f"/workbench/strategies/{strategy_version}")
     assert strategy_detail.status_code == 200
     strategy_payload = strategy_detail.json()
-    assert strategy_payload["strategy_version"] == strategy_version
-    assert "circuit_breaker" in strategy_payload
-    assert "failure_regimes" in strategy_payload
+    assert strategy_payload["spec"]["strategy_version"] == strategy_version
+    assert strategy_payload["source"] in {"placeholder", "strategy_registry", "run_registry_fallback"}
+    assert "circuit_breaker" in strategy_payload["spec"]
+    assert "failure_regimes" in strategy_payload["spec"]
 
 
 def test_workbench_factor_registry_endpoints() -> None:
@@ -240,13 +241,70 @@ def test_multi_market_compare_creates_parent_child_tasks() -> None:
     child_task_ids = payload.get("child_task_ids") or []
     assert parent_task_id
     assert len(child_task_ids) >= 2
+    assert payload["strategy_spec"]["schema_version"] == "strategy_spec.v1"
+    assert payload["strategy_spec"]["strategy_family"] == "trend"
+    assert payload["strategy_validation"]["schema_version"] == "strategy_validation.v1"
+    assert payload["strategy_validation"]["compile_ready"] is True
+    assert payload["strategy_compilation"]["schema_version"] == "strategy_compilation.v1"
+    assert payload["strategy_compilation"]["compilation_profile"]["schema_version"] == "strategy_compilation_profile.v1"
+    assert payload["strategy_compilation"]["compilation_policy"]["schema_version"] == "strategy_compilation_policy.v1"
+    assert payload["strategy_compilation"]["compilation_policy"]["rule_surface_id"] == "strategy_compilation.backtest.v1"
+    assert payload["outcome_summary"]["schema_version"] == "strategy_compare_outcome_summary.v1"
+    assert payload["outcome_summary"]["market_count"] >= 2
+    assert len(payload["outcome_summary"]["rows"]) >= 2
+    assert payload["result_details"]["schema_version"] == "strategy_compare_result_details.v1"
+    assert len(payload["result_details"]["diff_rows"]) >= 2
+    assert payload["rows"][0]["action_regime_details"]["schema_version"] == "strategy_runtime_action_regime.v1"
+    assert payload["rows"][0]["action_regime_details"]["detail_object"] == "MarketCompareRow"
+    assert payload["rows"][0]["attribution_execution_details"]["schema_version"] == "strategy_runtime_attribution_execution.v1"
+    assert payload["rows"][0]["attribution_execution_details"]["detail_object"] == "MarketCompareRow"
+    assert payload["rows"][0]["control_optimizer_details"]["schema_version"] == "strategy_runtime_control_optimizer.v1"
+    assert payload["rows"][0]["control_optimizer_details"]["detail_object"] == "MarketCompareRow"
+    assert payload["rows"][0]["control_action_deep_details"]["schema_version"] == "strategy_runtime_control_action_deep.v1"
+    assert payload["rows"][0]["control_action_deep_details"]["detail_object"] == "MarketCompareRow"
 
     parent = _wait_task(client, parent_task_id, timeout_s=8.0)
     assert parent["status"] == "done"
     assert parent.get("result_ref", {}).get("open_path")
+    assert (parent.get("result") or {}).get("strategy_validation", {}).get("schema_version") == "strategy_validation.v1"
+    assert (parent.get("result") or {}).get("strategy_compilation", {}).get("schema_version") == "strategy_compilation.v1"
+    assert ((parent.get("result") or {}).get("strategy_compilation", {}).get("compilation_profile") or {}).get("schema_version") == "strategy_compilation_profile.v1"
+    assert ((parent.get("result") or {}).get("strategy_compilation", {}).get("compilation_policy") or {}).get("schema_version") == "strategy_compilation_policy.v1"
+    assert ((parent.get("result") or {}).get("strategy_compilation", {}).get("compilation_policy") or {}).get("rule_surface_id") == "strategy_compilation.backtest.v1"
+    assert ((parent.get("result") or {}).get("outcome_summary") or {}).get("schema_version") == "strategy_compare_outcome_summary.v1"
+    assert len((((parent.get("result") or {}).get("outcome_summary") or {}).get("rows") or [])) >= 2
+    assert ((parent.get("result") or {}).get("result_details") or {}).get("schema_version") == "strategy_compare_result_details.v1"
+    assert len((((parent.get("result") or {}).get("result_details") or {}).get("diff_rows") or [])) >= 2
+    assert ((((parent.get("result") or {}).get("rows") or [])[0]).get("action_regime_details") or {}).get("schema_version") == "strategy_runtime_action_regime.v1"
+    assert ((((parent.get("result") or {}).get("rows") or [])[0]).get("attribution_execution_details") or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1"
+    assert ((((parent.get("result") or {}).get("rows") or [])[0]).get("control_optimizer_details") or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1"
+    assert ((((parent.get("result") or {}).get("rows") or [])[0]).get("control_action_deep_details") or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1"
 
     tasks = client.get("/workbench/tasks").json()
     children = [row for row in tasks if str(row.get("parent_task_id") or "") == parent_task_id]
     assert len(children) >= 2
     assert all(row.get("status") == "done" for row in children)
     assert all(str(row.get("result_ref", {}).get("run_id") or "").strip() for row in children)
+    assert all(((row.get("result") or {}).get("runtime_summary") or {}).get("schema_version") == "strategy_runtime_outcome_summary.v1" for row in children)
+    assert all(((row.get("result") or {}).get("runtime_diagnostics") or {}).get("schema_version") == "strategy_runtime_diagnostics.v1" for row in children)
+    assert all(((row.get("result") or {}).get("action_regime_details") or {}).get("schema_version") == "strategy_runtime_action_regime.v1" for row in children)
+    assert all(((row.get("result") or {}).get("attribution_execution_details") or {}).get("schema_version") == "strategy_runtime_attribution_execution.v1" for row in children)
+    assert all(((row.get("result") or {}).get("control_optimizer_details") or {}).get("schema_version") == "strategy_runtime_control_optimizer.v1" for row in children)
+    assert all(((row.get("result") or {}).get("control_action_deep_details") or {}).get("schema_version") == "strategy_runtime_control_action_deep.v1" for row in children)
+    child_run_id = str(children[0].get("result_ref", {}).get("run_id") or "")
+    child_report = client.get(f"/workbench/runs/{child_run_id}")
+    assert child_report.status_code == 200
+    assert child_report.json()["strategy_validation"]["schema_version"] == "strategy_validation.v1"
+    assert child_report.json()["strategy_compilation"]["schema_version"] == "strategy_compilation.v1"
+    assert child_report.json()["strategy_compilation"]["compilation_profile"]["schema_version"] == "strategy_compilation_profile.v1"
+    assert child_report.json()["strategy_compilation"]["compilation_policy"]["schema_version"] == "strategy_compilation_policy.v1"
+    assert child_report.json()["runtime_summary"]["schema_version"] == "strategy_runtime_outcome_summary.v1"
+    assert child_report.json()["runtime_diagnostics"]["schema_version"] == "strategy_runtime_diagnostics.v1"
+    assert child_report.json()["action_regime_details"]["schema_version"] == "strategy_runtime_action_regime.v1"
+    assert child_report.json()["action_regime_details"]["detail_object"] == "BacktestReport"
+    assert child_report.json()["attribution_execution_details"]["schema_version"] == "strategy_runtime_attribution_execution.v1"
+    assert child_report.json()["attribution_execution_details"]["detail_object"] == "BacktestReport"
+    assert child_report.json()["control_optimizer_details"]["schema_version"] == "strategy_runtime_control_optimizer.v1"
+    assert child_report.json()["control_optimizer_details"]["detail_object"] == "BacktestReport"
+    assert child_report.json()["control_action_deep_details"]["schema_version"] == "strategy_runtime_control_action_deep.v1"
+    assert child_report.json()["control_action_deep_details"]["detail_object"] == "BacktestReport"

@@ -2,17 +2,34 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+from openfinance.quant.backtest.evaluation_plan import (
+    BacktestEvaluationPlan,
+    FactorVersionRef,
+    backtest_evaluation_plan_payload,
+)
+from openfinance.quant.backtest.strategy_runtime_action_regime import StrategyRuntimeActionRegimeDetails
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    StrategyRuntimeAttributionExecutionDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    StrategyRuntimeControlActionDeepDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    StrategyRuntimeControlOptimizerDetails,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import StrategyRuntimeDiagnosticsResult
+from openfinance.quant.backtest.strategy_trace import StrategyTraceArtifact
+from openfinance.quant.backtest.strategy_runtime_summary import StrategyRuntimeOutcomeSummary
+from openfinance.research.strategy_compilation import StrategyCompilationPlan
+from openfinance.research.strategy_decision import StrategyDecision
+from openfinance.research.strategy_validation import StrategyValidationResult
 
 
 class CostModel(BaseModel):
     commission_bps: float = 0.0
     slippage_bps: float = 0.0
-
-
-class FactorVersionRef(BaseModel):
-    factor_id: str
-    version: str
 
 
 class BacktestRequest(BaseModel):
@@ -26,7 +43,14 @@ class BacktestRequest(BaseModel):
     cost_model: CostModel = Field(default_factory=CostModel)
     factor_versions: list[FactorVersionRef] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
-    evaluation_plan: dict[str, Any] = Field(default_factory=dict)
+    evaluation_plan: BacktestEvaluationPlan | dict[str, Any] = Field(default_factory=BacktestEvaluationPlan)
+
+    @field_serializer("evaluation_plan")
+    def _serialize_evaluation_plan(
+        self,
+        value: BacktestEvaluationPlan | dict[str, Any],
+    ) -> dict[str, Any]:
+        return backtest_evaluation_plan_payload(value)
 
 
 class BacktestOrder(BaseModel):
@@ -73,7 +97,16 @@ class BacktestReport(BaseModel):
     dataset_version: str
     market: str = "US"
     strategy_version: str
-    strategy_decision: dict[str, Any] = Field(default_factory=dict)
+    strategy_decision: StrategyDecision | None = None
+    strategy_validation: StrategyValidationResult | None = None
+    strategy_compilation: StrategyCompilationPlan | None = None
+    strategy_trace: StrategyTraceArtifact | None = None
+    runtime_summary: StrategyRuntimeOutcomeSummary | None = None
+    runtime_diagnostics: StrategyRuntimeDiagnosticsResult | None = None
+    action_regime_details: StrategyRuntimeActionRegimeDetails | None = None
+    attribution_execution_details: StrategyRuntimeAttributionExecutionDetails | None = None
+    control_optimizer_details: StrategyRuntimeControlOptimizerDetails | None = None
+    control_action_deep_details: StrategyRuntimeControlActionDeepDetails | None = None
     factor_versions: list[FactorVersionRef] = Field(default_factory=list)
     factor_versions_reason: str | None = None
     audit_trace_id: UUID = Field(default_factory=uuid4)

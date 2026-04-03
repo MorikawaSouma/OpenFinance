@@ -6,16 +6,41 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from openfinance.data.contracts.dataset import GeneratedDataset, OHLCVBar
-from openfinance.quant.backtest.report import BacktestRequest, CostModel
+from openfinance.quant.backtest.evaluation_plan import backtest_evaluation_plan_payload
+from openfinance.quant.backtest.report import BacktestRequest
 from openfinance.quant.backtest.robustness import (
     RegimeMetric,
+    RobustnessAnalysisConfig,
     RobustnessReport,
     RobustnessSummary,
     RobustnessVariant,
     StressMetric,
     WorstCaseSummary,
 )
+from openfinance.quant.backtest.strategy_runtime_action_regime import resolve_strategy_runtime_action_regime_details
+from openfinance.quant.backtest.strategy_runtime_attribution_execution import (
+    resolve_strategy_runtime_attribution_execution_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_action_deep import (
+    resolve_strategy_runtime_control_action_deep_details,
+)
+from openfinance.quant.backtest.strategy_runtime_control_optimizer import (
+    resolve_strategy_runtime_control_optimizer_details,
+)
+from openfinance.quant.backtest.strategy_runtime_diagnostics import build_strategy_robustness_result_details
+from openfinance.quant.backtest.strategy_runtime_summary import (
+    build_strategy_robustness_outcome_summary,
+    build_strategy_runtime_outcome_summary,
+)
+from openfinance.quant.backtest.strategy_trace import build_strategy_trace_artifact
 from openfinance.quant.backtest.runner import BacktestRunner
+from openfinance.research.strategy_compilation import (
+    build_strategy_compile_runtime_context,
+    build_strategy_compilation_plan,
+)
+from openfinance.research.strategy_request_builder import build_strategy_backtest_request
+from openfinance.research.strategy_spec import build_strategy_spec_from_constraints
+from openfinance.research.strategy_validation import StrategyValidator
 
 
 @dataclass(frozen=True)
@@ -34,6 +59,7 @@ class MetaBacktestConfig:
 class MetaBacktestRunner:
     def __init__(self, runner: BacktestRunner) -> None:
         self.runner = runner
+        self.strategy_validator = StrategyValidator()
 
     def plan_variants(self, request: BacktestRequest, config: MetaBacktestConfig | None = None) -> list[dict[str, Any]]:
         cfg = config or MetaBacktestConfig()
@@ -78,25 +104,48 @@ class MetaBacktestRunner:
                         "scenario": str(plan["scenario"]),
                     }
                 )
-            run_request = BacktestRequest(
-                dataset_version=request.dataset_version,
+            run_strategy_spec = build_strategy_spec_from_constraints(
                 strategy_id=request.strategy_id,
                 strategy_version=plan["strategy_version"],
                 market=request.market,
+                constraints=plan["constraints"],
+                rationale="Robustness variant strategy semantics derived from variant constraints.",
+            )
+            run_strategy_validation = self.strategy_validator.validate_spec(run_strategy_spec)
+            run_runtime_context = build_strategy_compile_runtime_context(
+                dataset_version=request.dataset_version,
                 start=request.start,
                 end=request.end,
                 execution_model=request.execution_model,
-                cost_model=CostModel(
-                    commission_bps=float(plan["commission_bps"]),
-                    slippage_bps=float(plan["slippage_bps"]),
+                run_time_utc=str(request.constraints.get("run_time_utc", "16:00")),
+                commission_bps=float(plan["commission_bps"]),
+                slippage_bps=float(plan["slippage_bps"]),
+                auto_round_lot=(
+                    bool(plan["constraints"].get("auto_round_lot"))
+                    if "auto_round_lot" in plan["constraints"]
+                    else None
                 ),
-                factor_versions=list(request.factor_versions),
+                provenance_mode="runtime_variant",
+            )
+            run_strategy_compilation = build_strategy_compilation_plan(
+                run_strategy_spec,
+                run_strategy_validation,
+                runtime_context=run_runtime_context,
+            )
+            run_request = build_strategy_backtest_request(
+                strategy_id=request.strategy_id,
+                strategy_version=plan["strategy_version"],
+                market=request.market,
+                runtime_context=run_runtime_context,
                 constraints=dict(plan["constraints"]),
+                factor_versions=list(request.factor_versions),
                 evaluation_plan={
-                    **dict(request.evaluation_plan),
+                    **backtest_evaluation_plan_payload(request.evaluation_plan),
                     "meta_variant_id": plan["variant_id"],
                     "meta_group": plan["group"],
                 },
+                strategy_validation=run_strategy_validation,
+                strategy_compilation=run_strategy_compilation,
             )
             report = self.runner.run(run_request)
             metrics = report.metrics
@@ -110,6 +159,31 @@ class MetaBacktestRunner:
                 slippage_bps=float(plan["slippage_bps"]),
                 constraints=dict(plan["constraints"]),
                 metrics=metrics,
+                action_regime_details=resolve_strategy_runtime_action_regime_details(
+                    detail_object="RobustnessVariant",
+                    details=report.action_regime_details,
+                    diagnostics=report.diagnostics,
+                ),
+                attribution_execution_details=resolve_strategy_runtime_attribution_execution_details(
+                    detail_object="RobustnessVariant",
+                    details=report.attribution_execution_details,
+                    cost_breakdown=report.cost_breakdown,
+                    attribution=report.attribution,
+                    diagnostics=report.diagnostics,
+                    orders=report.orders,
+                    trades=report.trades,
+                    metrics=report.metrics,
+                ),
+                control_optimizer_details=resolve_strategy_runtime_control_optimizer_details(
+                    detail_object="RobustnessVariant",
+                    details=report.control_optimizer_details,
+                    diagnostics=report.diagnostics,
+                ),
+                control_action_deep_details=resolve_strategy_runtime_control_action_deep_details(
+                    detail_object="RobustnessVariant",
+                    details=report.control_action_deep_details,
+                    diagnostics=report.diagnostics,
+                ),
             )
             variants.append(variant)
             table.append(
@@ -143,6 +217,26 @@ class MetaBacktestRunner:
                             "total_return": self._metric(metrics, "total_return"),
                             "cost_drag": self._metric(metrics, "cost_drag"),
                         },
+                        "action_regime_details": (
+                            variant.action_regime_details.model_dump(mode="json")
+                            if variant.action_regime_details is not None
+                            else None
+                        ),
+                        "attribution_execution_details": (
+                            variant.attribution_execution_details.model_dump(mode="json")
+                            if variant.attribution_execution_details is not None
+                            else None
+                        ),
+                        "control_optimizer_details": (
+                            variant.control_optimizer_details.model_dump(mode="json")
+                            if variant.control_optimizer_details is not None
+                            else None
+                        ),
+                        "control_action_deep_details": (
+                            variant.control_action_deep_details.model_dump(mode="json")
+                            if variant.control_action_deep_details is not None
+                            else None
+                        ),
                     }
                 )
 
@@ -169,8 +263,68 @@ class MetaBacktestRunner:
         worst_case = self._build_worst_case_summary(regime_metrics=regime_metrics, stress_metrics=stress_metrics)
         if progress_callback is not None:
             progress_callback({"phase": "finalize", "worst_case": worst_case.model_dump(mode="json")})
+        base_strategy_spec = build_strategy_spec_from_constraints(
+            strategy_id=request.strategy_id,
+            strategy_version=request.strategy_version,
+            market=request.market,
+            constraints=request.constraints,
+            rationale="Robustness base strategy semantics derived from request.",
+        )
+        base_strategy_validation = self.strategy_validator.validate_spec(base_strategy_spec)
+        base_runtime_context = build_strategy_compile_runtime_context(
+            dataset_version=request.dataset_version,
+            start=request.start,
+            end=request.end,
+            execution_model=request.execution_model,
+            run_time_utc=str(request.constraints.get("run_time_utc", "16:00")),
+            commission_bps=float(getattr(request.cost_model, "commission_bps", 0.0) or 0.0),
+            slippage_bps=float(getattr(request.cost_model, "slippage_bps", 0.0) or 0.0),
+            auto_round_lot=(
+                bool(request.constraints.get("auto_round_lot"))
+                if isinstance(request.constraints, dict) and "auto_round_lot" in request.constraints
+                else None
+            ),
+            provenance_mode="user_requested",
+        )
+        base_strategy_compilation = build_strategy_compilation_plan(
+            base_strategy_spec,
+            base_strategy_validation,
+            runtime_context=base_runtime_context,
+        )
+        normalized_base_request = build_strategy_backtest_request(
+            strategy_id=request.strategy_id,
+            strategy_version=request.strategy_version,
+            market=request.market,
+            runtime_context=base_runtime_context,
+            constraints=dict(request.constraints),
+            factor_versions=list(request.factor_versions),
+            evaluation_plan=backtest_evaluation_plan_payload(request.evaluation_plan),
+            strategy_validation=base_strategy_validation,
+            strategy_compilation=base_strategy_compilation,
+        )
+        robustness_id = f"rob_{uuid4().hex[:12]}"
+        base_runtime_summary = build_strategy_runtime_outcome_summary(
+            summary_object="RobustnessBase",
+            run_id=None,
+            dataset_version=normalized_base_request.dataset_version,
+            market=request.market,
+            strategy_version=normalized_base_request.strategy_version,
+            metrics={
+                "sharpe": summary.sharpe_mean,
+                "max_drawdown": summary.mdd_worst_case,
+                "total_return": summary.total_return_worst_case,
+                "trade_count": summary.variant_count,
+            },
+            strategy_trace=build_strategy_trace_artifact(
+                trace_object="BacktestRequest",
+                strategy_validation=base_strategy_validation,
+                strategy_compilation=base_strategy_compilation,
+                evaluation_plan=normalized_base_request.evaluation_plan,
+                factor_versions=normalized_base_request.factor_versions,
+            ),
+        )
         return RobustnessReport(
-            robustness_id=f"rob_{uuid4().hex[:12]}",
+            robustness_id=robustness_id,
             dataset_version=request.dataset_version,
             strategy_id=request.strategy_id,
             strategy_version=request.strategy_version,
@@ -181,19 +335,42 @@ class MetaBacktestRunner:
             regime_metrics=regime_metrics,
             stress_metrics=stress_metrics,
             worst_case_summary=worst_case,
-            base_spec={
-                "cost_multipliers": list(cfg.cost_multipliers),
-                "lookback_values": list(cfg.lookback_values) if cfg.lookback_values is not None else None,
-                "threshold_values": list(cfg.threshold_values) if cfg.threshold_values is not None else None,
-                "rebalance_values": list(cfg.rebalance_values) if cfg.rebalance_values is not None else None,
-                "min_variants": cfg.min_variants,
-                "max_variants": cfg.max_variants,
-                "regime_vol_window": cfg.regime_vol_window,
-                "stress_shock_return": cfg.stress_shock_return,
-                "stress_vol_multiplier": cfg.stress_vol_multiplier,
-                "base_constraints": request.constraints,
-                "base_cost_model": request.cost_model.model_dump(mode="json"),
-            },
+            outcome_summary=build_strategy_robustness_outcome_summary(
+                robustness_id=robustness_id,
+                market=request.market,
+                variant_count=summary.variant_count,
+                sharpe_std=summary.sharpe_std,
+                mdd_worst_case=summary.mdd_worst_case,
+                stability_score=summary.stability_score,
+                worst_case_source_type=worst_case.source_type,
+                worst_case_run_id=worst_case.run_id or None,
+                base_runtime_summary=base_runtime_summary,
+            ),
+            result_details=build_strategy_robustness_result_details(
+                robustness_id=robustness_id,
+                variant_rows=table,
+                regime_metric_count=len(regime_metrics),
+                stress_metric_count=len(stress_metrics),
+                best_variant_id=summary.best_variant_id or None,
+                worst_variant_id=summary.worst_variant_id or None,
+            ),
+            base_strategy_spec=base_strategy_spec,
+            base_strategy_validation=base_strategy_validation,
+            base_strategy_compilation=base_strategy_compilation,
+            base_backtest_request=normalized_base_request,
+            analysis_config=RobustnessAnalysisConfig(
+                cost_multipliers=list(cfg.cost_multipliers),
+                lookback_values=list(cfg.lookback_values) if cfg.lookback_values is not None else None,
+                threshold_values=list(cfg.threshold_values) if cfg.threshold_values is not None else None,
+                rebalance_values=list(cfg.rebalance_values) if cfg.rebalance_values is not None else None,
+                min_variants=cfg.min_variants,
+                max_variants=cfg.max_variants,
+                regime_vol_window=cfg.regime_vol_window,
+                stress_shock_return=cfg.stress_shock_return,
+                stress_vol_multiplier=cfg.stress_vol_multiplier,
+                base_constraints=dict(request.constraints),
+                base_cost_model=request.cost_model.model_dump(mode="json"),
+            ),
         )
 
     def _load_dataset(self, dataset_version: str) -> GeneratedDataset | None:
@@ -219,17 +396,48 @@ class MetaBacktestRunner:
                 continue
             sliced = self._slice_dataset(dataset, idxs, suffix=f"regime_{regime_id}")
             ds_entry = self.runner.dataset_registry.register(sliced)
-            run_req = request.model_copy(
-                update={
-                    "dataset_version": ds_entry.dataset_version,
-                    "strategy_version": f"{request.strategy_version}__regime_{regime_id}",
-                    "evaluation_plan": {
-                        **dict(request.evaluation_plan),
-                        "meta_variant_id": f"regime_{regime_id}",
-                        "meta_group": "regime_slice",
-                    },
+            run_strategy_spec = build_strategy_spec_from_constraints(
+                strategy_id=request.strategy_id,
+                strategy_version=f"{request.strategy_version}__regime_{regime_id}",
+                market=request.market,
+                constraints=request.constraints,
+                rationale="Regime-slice strategy semantics derived from robustness base request.",
+            )
+            run_strategy_validation = self.strategy_validator.validate_spec(run_strategy_spec)
+            run_runtime_context = build_strategy_compile_runtime_context(
+                dataset_version=ds_entry.dataset_version,
+                start=request.start,
+                end=request.end,
+                execution_model=request.execution_model,
+                run_time_utc=str(request.constraints.get("run_time_utc", "16:00")),
+                commission_bps=float(getattr(request.cost_model, "commission_bps", 0.0) or 0.0),
+                slippage_bps=float(getattr(request.cost_model, "slippage_bps", 0.0) or 0.0),
+                auto_round_lot=(
+                    bool(request.constraints.get("auto_round_lot"))
+                    if isinstance(request.constraints, dict) and "auto_round_lot" in request.constraints
+                    else None
+                ),
+                provenance_mode="user_requested",
+            )
+            run_strategy_compilation = build_strategy_compilation_plan(
+                run_strategy_spec,
+                run_strategy_validation,
+                runtime_context=run_runtime_context,
+            )
+            run_req = build_strategy_backtest_request(
+                strategy_id=request.strategy_id,
+                strategy_version=f"{request.strategy_version}__regime_{regime_id}",
+                market=request.market,
+                runtime_context=run_runtime_context,
+                constraints=dict(request.constraints),
+                factor_versions=list(request.factor_versions),
+                evaluation_plan={
+                    **backtest_evaluation_plan_payload(request.evaluation_plan),
+                    "meta_variant_id": f"regime_{regime_id}",
+                    "meta_group": "regime_slice",
                 },
-                deep=True,
+                strategy_validation=run_strategy_validation,
+                strategy_compilation=run_strategy_compilation,
             )
             report = self.runner.run(run_req)
             first_ts = sliced.market[0].ts.isoformat() if sliced.market else ""
@@ -276,17 +484,48 @@ class MetaBacktestRunner:
         for item in scenarios:
             stressed: GeneratedDataset = item["dataset"]
             ds_entry = self.runner.dataset_registry.register(stressed)
-            run_req = request.model_copy(
-                update={
-                    "dataset_version": ds_entry.dataset_version,
-                    "strategy_version": f"{request.strategy_version}__{item['stress_id']}",
-                    "evaluation_plan": {
-                        **dict(request.evaluation_plan),
-                        "meta_variant_id": str(item["stress_id"]),
-                        "meta_group": "stress_scenario",
-                    },
+            run_strategy_spec = build_strategy_spec_from_constraints(
+                strategy_id=request.strategy_id,
+                strategy_version=f"{request.strategy_version}__{item['stress_id']}",
+                market=request.market,
+                constraints=request.constraints,
+                rationale="Stress-scenario strategy semantics derived from robustness base request.",
+            )
+            run_strategy_validation = self.strategy_validator.validate_spec(run_strategy_spec)
+            run_runtime_context = build_strategy_compile_runtime_context(
+                dataset_version=ds_entry.dataset_version,
+                start=request.start,
+                end=request.end,
+                execution_model=request.execution_model,
+                run_time_utc=str(request.constraints.get("run_time_utc", "16:00")),
+                commission_bps=float(getattr(request.cost_model, "commission_bps", 0.0) or 0.0),
+                slippage_bps=float(getattr(request.cost_model, "slippage_bps", 0.0) or 0.0),
+                auto_round_lot=(
+                    bool(request.constraints.get("auto_round_lot"))
+                    if isinstance(request.constraints, dict) and "auto_round_lot" in request.constraints
+                    else None
+                ),
+                provenance_mode="user_requested",
+            )
+            run_strategy_compilation = build_strategy_compilation_plan(
+                run_strategy_spec,
+                run_strategy_validation,
+                runtime_context=run_runtime_context,
+            )
+            run_req = build_strategy_backtest_request(
+                strategy_id=request.strategy_id,
+                strategy_version=f"{request.strategy_version}__{item['stress_id']}",
+                market=request.market,
+                runtime_context=run_runtime_context,
+                constraints=dict(request.constraints),
+                factor_versions=list(request.factor_versions),
+                evaluation_plan={
+                    **backtest_evaluation_plan_payload(request.evaluation_plan),
+                    "meta_variant_id": str(item["stress_id"]),
+                    "meta_group": "stress_scenario",
                 },
-                deep=True,
+                strategy_validation=run_strategy_validation,
+                strategy_compilation=run_strategy_compilation,
             )
             report = self.runner.run(run_req)
             out.append(

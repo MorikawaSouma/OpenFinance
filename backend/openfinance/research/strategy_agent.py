@@ -2,34 +2,12 @@
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from openfinance.llm.provider import LLMProviderRegistry
-
-
-class StrategyDecisionCandidate(BaseModel):
-    name: str
-    spec: dict[str, Any] = Field(default_factory=dict)
-    pros: list[str] = Field(default_factory=list)
-    cons: list[str] = Field(default_factory=list)
-    risks: list[str] = Field(default_factory=list)
-    expected_failure_regimes: list[str] = Field(default_factory=list)
-    cost_profile: str = ""
-    why_not_selected: str = ""
-
-
-class StrategyDecisionSelected(BaseModel):
-    name: str
-    spec: dict[str, Any] = Field(default_factory=dict)
-    rationale: str = ""
-    tradeoff_summary: str = ""
-
-
-class StrategyDecision(BaseModel):
-    candidates: list[StrategyDecisionCandidate] = Field(default_factory=list)
-    selected: StrategyDecisionSelected
-    llm_mode: str = "rule_fallback"
-
+from openfinance.research.strategy_decision import (
+    StrategyDecision,
+    StrategyDecisionCandidate,
+    StrategyDecisionSelected,
+)
 
 class StrategyAgent:
     def __init__(self, llm_registry: LLMProviderRegistry) -> None:

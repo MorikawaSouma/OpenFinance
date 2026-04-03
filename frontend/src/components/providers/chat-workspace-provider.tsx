@@ -13,10 +13,12 @@ import {
 
 import {
   useResearchContextActions,
+  useResearchSessionContinuityActions,
   useResearchContextState,
+  type ResearchSessionContinuitySource,
 } from "@/components/providers/research-context-provider";
+import { useCoordinatorRawEventFeed } from "@/components/providers/realtime-coordinator-provider";
 import { useWorkbenchShellState } from "@/components/providers/workbench-shell-provider";
-import { useWorkbenchChat } from "@/components/providers/workbench-provider";
 import { api } from "@/lib/api";
 import { executeChatSend } from "@/lib/chat-runtime";
 import { messages } from "@/lib/messages";
@@ -188,8 +190,9 @@ function resolveChatBootstrapPriority(options: {
 export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
   const { lastSessionId, restoredSessionId, restoredTraceId: researchRestoredTraceId } = useResearchContextState();
   const { clearRestoreContext } = useResearchContextActions();
+  const { commitDefaultSessionScope } = useResearchSessionContinuityActions();
   const { mode } = useWorkbenchShellState();
-  const { events, syncActiveSession } = useWorkbenchChat();
+  const events = useCoordinatorRawEventFeed();
   const currentRiskSnapshot = useRiskApprovalStore((state) => state.riskSnapshot);
   const setRiskSnapshot = useRiskApprovalStore((state) => state.setRiskSnapshot);
   const upsertApproval = useRiskApprovalStore((state) => state.upsertApproval);
@@ -241,13 +244,19 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
     return [...rows];
   }, [chatSessions]);
 
-  const syncWorkspaceActiveSession = useCallback(
-    (sessionId: string | null) => {
-      const nextSessionId = normalizeNullableString(sessionId);
-      setActiveSessionId(nextSessionId);
-      syncActiveSession(nextSessionId);
+  const setResolvedActiveSession = useCallback((sessionId: string | null) => {
+    const nextSessionId = normalizeNullableString(sessionId);
+    setActiveSessionId(nextSessionId);
+    return nextSessionId;
+  }, []);
+
+  const commitWorkspaceDefaultSessionScope = useCallback(
+    (sessionId: string | null, source: ResearchSessionContinuitySource) => {
+      const nextSessionId = setResolvedActiveSession(sessionId);
+      commitDefaultSessionScope(nextSessionId, source);
+      return nextSessionId;
     },
-    [syncActiveSession]
+    [commitDefaultSessionScope, setResolvedActiveSession]
   );
 
   const beginTrackedFreshness = useCallback((background: boolean) => {
@@ -286,7 +295,12 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const refreshSessionList = useCallback(
-    async (options?: { preferredSessionId?: string | null; skipTurnsReload?: boolean; background?: boolean }) => {
+    async (options?: {
+      preferredSessionId?: string | null;
+      skipTurnsReload?: boolean;
+      background?: boolean;
+      continuitySource?: "chat.bootstrap_resolved";
+    }) => {
       const background = options?.background ?? false;
       if (!background) {
         setSessionsLoading(true);
@@ -302,7 +316,15 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
           rows,
         });
         if (targetSessionId) {
-          syncWorkspaceActiveSession(targetSessionId);
+          const continuitySource =
+            options?.continuitySource ??
+            (activeSessionId && targetSessionId !== activeSessionId ? "chat.reconcile_fallback" : null);
+
+          if (continuitySource) {
+            commitWorkspaceDefaultSessionScope(targetSessionId, continuitySource);
+          } else if (targetSessionId !== activeSessionId) {
+            setResolvedActiveSession(targetSessionId);
+          }
           const cachedTurns = persistedSessions[targetSessionId]?.turns ?? [];
           if (!options?.skipTurnsReload && (cachedTurns.length === 0 || targetSessionId !== activeSessionId)) {
             await refreshActiveSessionTurns(targetSessionId, { background });
@@ -325,12 +347,13 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
     },
     [
       activeSessionId,
+      commitWorkspaceDefaultSessionScope,
       beginTrackedFreshness,
       lastSessionId,
       persistedSessions,
       refreshActiveSessionTurns,
       routeSessionId,
-      syncWorkspaceActiveSession,
+      setResolvedActiveSession,
     ]
   );
 
@@ -338,7 +361,7 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
     async (sessionId: string) => {
       const targetSessionId = normalizeNullableString(sessionId);
       if (!targetSessionId) return;
-      syncWorkspaceActiveSession(targetSessionId);
+      commitWorkspaceDefaultSessionScope(targetSessionId, "chat.user_select");
       setChatWorkspaceError(null);
       const cachedTurns = persistedSessions[targetSessionId]?.turns ?? [];
       if (cachedTurns.length === 0) {
@@ -347,7 +370,7 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
       }
       void refreshActiveSessionTurns(targetSessionId, { background: true });
     },
-    [persistedSessions, refreshActiveSessionTurns, syncWorkspaceActiveSession]
+    [commitWorkspaceDefaultSessionScope, persistedSessions, refreshActiveSessionTurns]
   );
 
   const reconcileChatFreshness = useCallback(
@@ -379,9 +402,6 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       const sessionIdForRequest = activeSessionId ?? routeSessionId ?? lastSessionId ?? null;
-      if (sessionIdForRequest) {
-        syncWorkspaceActiveSession(sessionIdForRequest);
-      }
 
       setSending(true);
       setPendingMessage(trimmed);
@@ -391,7 +411,9 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
           sessionIdForRequest,
           includeDebug: mode === "developer",
           currentRiskSnapshot,
-          syncActiveSession: syncWorkspaceActiveSession,
+          commitResolvedSessionScope: (sessionId) => {
+            commitWorkspaceDefaultSessionScope(sessionId, "chat.send_response");
+          },
           upsertChatResponse,
           setRiskSnapshot,
           upsertApproval,
@@ -425,7 +447,7 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
       routeSessionId,
       sending,
       setRiskSnapshot,
-      syncWorkspaceActiveSession,
+      commitWorkspaceDefaultSessionScope,
       syncTaskTerminalState,
       upsertApproval,
       upsertChatResponse,
@@ -447,11 +469,12 @@ export function ChatWorkspaceProvider({ children }: { children: ReactNode }) {
     setSessionResolutionSource(resolved.source);
     void refreshSessionList({
       preferredSessionId: resolved.preferredSessionId,
+      continuitySource: "chat.bootstrap_resolved",
     });
     if (resolved.shouldConsumeRestorePayload) {
       clearRestoreContext();
     }
-    // Initialize the route-local chat workspace once. Subsequent freshness comes from explicit actions and legacy event feed.
+    // Initialize the route-local chat workspace once. Subsequent freshness comes from explicit actions and coordinator-owned raw events.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -581,16 +604,4 @@ export function useChatWorkspaceActions() {
     throw new Error("useChatWorkspaceActions must be used within ChatWorkspaceProvider");
   }
   return ctx;
-}
-
-export function useChatWorkspaceLegacyBridge() {
-  // Explicit transitional bridge: global SSE/event feed buffering remains legacy-backed after chat restore/freshness ownership moves.
-  const workbenchChat = useWorkbenchChat();
-
-  return {
-    bridgeOwnership: "legacy-workbench-provider" as const,
-    bridgeStatus: "required-for-global-chat-events" as const,
-    events: workbenchChat.events,
-    sseConnectionState: workbenchChat.sseConnectionState,
-  };
 }
